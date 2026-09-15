@@ -2,9 +2,10 @@ import { FormEvent, PointerEvent as ReactPointerEvent, ReactNode, useEffect, use
 import * as THREE from "three";
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
-import { filterCatalogByDiscipline } from "../../drawingFilters";
+import { drawingDisciplineGlobalIds, filterCatalogByDiscipline, filterCatalogBySemanticQuery } from "../../drawingFilters";
 import { assetGlobalIds, groupAssets, layoutGraph, systemAssetGlobalIds } from "../../graphLayout";
 import { AirflowAlarmContext, airflowAlarm, airflowContextChips, airflowDeviationPercent, buildAirflowAssistantQuestion } from "../../demoFlow";
+import { extractSemanticObjects, isAssetSemanticObject } from "../../semanticObjects";
 const IFC_MODEL_URL = "/model/airport-mep-v2.glb";
 type Page = "login" | "home" | "drawings" | "graph" | "assistant";
 type IconName = "grid" | "drawing" | "graph" | "chat" | "search" | "bell" | "user" | "chevron" | "activity" | "bolt" | "alarm" | "work" | "building" | "filter" | "layers" | "expand" | "more" | "arrow" | "send" | "file" | "clock" | "check" | "warning" | "logout" | "spark" | "pin" | "link";
@@ -258,6 +259,26 @@ const homeAlarms: HomeAlarm[] = [{
   severity: "mid",
   ifcGlobalId: "2LnU_nN4n7j8uYrOc9CFJd"
 }];
+function SemanticObjectText({
+  text,
+  onObjectClick,
+  assetsOnly = false
+}: {
+  text: string;
+  onObjectClick?: (value: string) => void;
+  assetsOnly?: boolean;
+}) {
+  if (!onObjectClick) return <>{text}</>;
+  const objects = extractSemanticObjects(text).filter(value => !assetsOnly || isAssetSemanticObject(value));
+  if (!objects.length) return <>{text}</>;
+  const objectSet = new Set(objects);
+  const pattern = new RegExp(`(${objects.map(value => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/ /g, "\\s+")).join("|")})`, "gi");
+  return <>{text.split(pattern).map((part, index) => {
+    const normalized = part.replace(/\s+/g, " ").toUpperCase();
+    if (!objectSet.has(normalized)) return part;
+    return <a key={`${part}-${index}`} className="semantic-object-link" href={`#object/${encodeURIComponent(normalized)}`} onClick={event => { event.preventDefault(); onObjectClick(normalized); }}>{part}</a>;
+  })}</>;
+}
 function SemanticQuery({
   value,
   onChange,
@@ -266,7 +287,8 @@ function SemanticQuery({
   count,
   loading,
   error,
-  examples
+  examples,
+  onObjectClick
 }: {
   value: string;
   onChange: (value: string) => void;
@@ -276,6 +298,7 @@ function SemanticQuery({
   loading?: boolean;
   error?: string;
   examples?: Array<{ question: string; answer: string }>;
+  onObjectClick?: (value: string) => void;
 }) {
   const [answer, setAnswer] = useState("");
   const samples = examples || [{ question: "有哪些暖通设备？", answer: `已在 ${context} 中定位空调机组、风管、风阀与末端送风设备。` }, { question: "查最新版本图纸", answer: `已筛选 ${context} 对应的当前有效图纸，可在右侧列表打开原始 PDF。` }, { question: "当前报警关联哪里？", answer: "已关联报警构件、所属系统、上游设备和服务区域。" }];
@@ -284,13 +307,13 @@ function SemanticQuery({
     if (!normalized) return;
     const preset = samples.find(sample => sample.question === normalized);
     setAnswer(preset?.answer || `已结合 ${context} 的 IFC、图纸和台账数据执行查询，结果已同步到当前页面。`);
-    if (!preset) onSubmit(normalized);
+    onSubmit(normalized);
   };
   return <section className="semantic-query compact-query">
     <div className="semantic-head"><span className="ai-square"><Icon name="spark" /></span><div><small>语义问答查询</small><strong>基于当前空间与业务上下文</strong></div>{typeof count === "number" && <Badge tone="blue">{count} 个匹配</Badge>}</div>
     <div className="semantic-input"><input value={value} onChange={event => onChange(event.target.value)} placeholder={`询问 ${context} 的设备、系统或图纸…`} onKeyDown={event => event.key === "Enter" && submit(value)} /><button className="primary" onClick={() => submit(value)} disabled={loading || !value.trim()}><Icon name="send" />{loading ? "检索中" : "发送"}</button></div>
     <div className="semantic-samples">{samples.map(sample => <button key={sample.question} className={value === sample.question ? "active" : ""} onClick={() => { onChange(sample.question); setAnswer(""); }}>{sample.question}</button>)}{error && <Badge tone="red">{error}</Badge>}</div>
-    {answer && <div className="semantic-answer" role="status"><Icon name="spark" size={15} /><span><strong>查询结果</strong>{answer}</span></div>}
+    {answer && <div className="semantic-answer" role="status"><Icon name="spark" size={15} /><span><strong>查询结果</strong><SemanticObjectText text={answer} onObjectClick={onObjectClick} /></span></div>}
   </section>;
 }
 function Home({ startAirflowDemo }: { startAirflowDemo: () => void }) {
@@ -470,6 +493,7 @@ function Drawings({
 }) {
   const [catalog, setCatalog] = useState<DrawingRecord[]>([]);
   const [records, setRecords] = useState<DrawingRecord[]>([]);
+  const [modelAssets, setModelAssets] = useState<AssetRecord[]>([]);
   const [tree, setTree] = useState<DrawingTreeItem[]>([]);
   const [total, setTotal] = useState(0);
   const [selectedId, setSelectedId] = useState("");
@@ -520,6 +544,9 @@ function Drawings({
       if (requestId === requestSequence.current) setLoading(false);
     });
   }, []);
+  useEffect(() => {
+    fetch("/api/assets?limit=2000").then(response => response.ok ? response.json() : Promise.reject()).then(data => setModelAssets(data.items || [])).catch(() => setModelAssets([]));
+  }, []);
   const showDiscipline = (name: string) => {
     requestSequence.current += 1;
     setLoading(false);
@@ -537,11 +564,28 @@ function Drawings({
     setQuery(`${name}全部图纸`);
     applyRecords(catalog);
   };
+  const handleSemanticDrawingQuery = (value: string) => {
+    const items = filterCatalogBySemanticQuery(catalog, value);
+    const recognized = /建筑|暖通|消防|电气|给排水|风管|ifc|关联/i.test(value);
+    if (!recognized) {
+      loadDrawings(value);
+      return;
+    }
+    requestSequence.current += 1;
+    setLoading(false);
+    setLoadError("");
+    const matchedDiscipline = ["建筑", "暖通", "消防", "电气", "给排水"].find(name => value.includes(name));
+    setDiscipline(matchedDiscipline || "全部专业");
+    applyRecords(items);
+  };
   const visibleRecords = records;
   const selected = records.find(d => d.id === selectedId) || records[0] || null;
   const disciplineTree = useMemo(() => tree.flatMap(item => item.node_type === "space" ? item.children || [] : [item]), [tree]);
   const disciplineCounts = useMemo(() => Object.fromEntries(disciplineTree.map(item => [item.name, item.count])), [disciplineTree]);
   const selectedRoom = drawingRoomOptions.find(room => room.id === selectedRoomId) || drawingRoomOptions[0];
+  const disciplineModelIds = useMemo(() => drawingDisciplineGlobalIds(modelAssets, discipline), [modelAssets, discipline]);
+  const drawingModelIds = discipline === "全部专业" ? (selectedRoomId === "m18" && selected?.ifc_room ? ["3nUg2jPlz76PUi_3jscap4"] : []) : disciplineModelIds;
+  const drawingModelLabel = discipline === "全部专业" ? selectedRoom.label : `${discipline}专业 · ${disciplineModelIds.length}个相关构件`;
   const toggleRoom = (roomId: string) => setOpenRooms(current => {
     const next = new Set(current);
     if (next.has(roomId)) next.delete(roomId); else next.add(roomId);
@@ -563,8 +607,8 @@ function Drawings({
         <div className="discipline-list"><small>专业筛选</small>{["全部专业", ...disciplineTree.map(item => item.name)].map(x => <button key={x} className={discipline === x ? "active" : ""} onClick={() => showDiscipline(x)}><span>{x}</span><b>{x === "全部专业" ? total : disciplineCounts[x] || 0}</b></button>)}</div>
       </aside>
       <main className="panel feedback-center drawing-center-feedback">
-        <MiniModel selectedGlobalIds={selectedRoomId === "m18" && selected?.ifc_room ? ["3nUg2jPlz76PUi_3jscap4"] : []} selectedLabel={selectedRoom.label} title="IFC 三维模型" className="drawing-ifc-model" />
-        <SemanticQuery value={query} onChange={setQuery} onSubmit={loadDrawings} context={selectedRoom.label} count={records.length} loading={loading} error={loadError} examples={drawingExamples} />
+        <MiniModel selectedGlobalIds={drawingModelIds} selectedLabel={drawingModelLabel} title="IFC 三维模型" className="drawing-ifc-model" />
+        <SemanticQuery value={query} onChange={setQuery} onSubmit={handleSemanticDrawingQuery} context={selectedRoom.label} count={records.length} loading={loading} error={loadError} examples={drawingExamples} />
       </main>
       <aside className="panel result-panel feedback-results">
         <div className="panel-head"><div><small>选中空间对应图纸</small><h3>{discipline === "全部专业" ? "T-BE-B1-M18 空调机房" : `${discipline}专业`}</h3></div><Badge tone="blue">{visibleRecords.length} 份</Badge></div>
@@ -892,7 +936,7 @@ function MiniModel({
 type GraphApiNode = { id: string; label: string; kind: string; ifc_class?: string; properties?: Record<string, unknown> };
 type GraphApiEdge = { source: string; target: string; type: string; source_kind?: string };
 type PositionedGraphNode = GraphApiNode & { x: number; y: number; tone: string };
-type AssetRecord = { asset_code: string; name: string; ifc_global_id: string; ifc_class: string; system: string; location: string };
+type AssetRecord = { asset_code: string; name: string; ifc_global_id: string; ifc_class: string; system: string; location: string; type_name?: string; service_scope?: string; model?: string; manufacturer?: string };
 type GraphData = {
   meta: { ifc_schema: string; ifc_product_count: number; asset_count: number; room_count: number; point_count: number; service_area_count: number };
   nodes: GraphApiNode[];
@@ -960,12 +1004,12 @@ function KnowledgeGraph({ demoAlarm, goAssistant }: { demoAlarm: AirflowAlarmCon
       const nextData = demoAlarm ? withAirflowDemoOverlay(data, demoAlarm) : data;
       setGraphData(nextData);
       setCurrentFocus(normalized);
-      setModelGroup(null);
       const focusNode = nextData.nodes.find(node => node.label === normalized || node.id.endsWith(`:${normalized}`)) || nextData.nodes[0];
       if (focusNode) {
         setSelected(focusNode.id);
         setFocusId(focusNode.id);
         setNodeOverrides({});
+        setModelGroup(focusNode.kind === "系统" ? { name: focusNode.label, label: `${focusNode.label} 系统`, systemName: focusNode.label } : null);
       }
     }).catch(() => setGraphData(null));
   };
@@ -1061,6 +1105,7 @@ function KnowledgeGraph({ demoAlarm, goAssistant }: { demoAlarm: AirflowAlarmCon
   const selectedModelLabel = modelGroup?.label || selectedNode.label;
   const entityFilters: Array<[string, number, string]> = [["设备", graphData?.nodes.filter(node => node.kind === "设备" || node.kind === "设备类型").length || 0, "#2d6f93"], ["系统", graphData?.nodes.filter(node => node.kind === "系统").length || 0, "#5d88a0"], ["空间", graphData?.nodes.filter(node => node.kind === "空间" || node.kind === "房间").length || 0, "#c38a2e"], ["服务区域", graphData?.meta.service_area_count || 0, "#c38a2e"], ["点位", graphData?.meta.point_count || 0, "#2d8061"], ["报警", graphData?.nodes.filter(node => node.kind === "报警").length || 0, "#b94b45"]];
   const graphExamples = [{ question: "AHU-0B2-04 属于哪个系统？", answer: "AHU-0B2-04 已关联送风系统 SA 94、回风系统 RA 93 和新风系统 FA 58。" }, { question: "该设备服务哪些区域？", answer: "当前图谱关联 B1 公共区东段、L1 到达厅东区和 L2 候机区中段 3 个服务区域。" }, { question: "当前报警关联哪些对象？", answer: demoAlarm ? "风量不足报警已关联末端风口 5466537、上游风管 5466492、SA 94 系统及 AHU-0B2-04。" : "当前对象可从关系网络继续查看所属系统、空间、点位与服务区域。" }];
+  const handleGraphSemanticQuery = (value: string) => loadGraph(extractSemanticObjects(value)[0] || currentFocus);
   return <div className="page graph-page">
     <div className="page-head compact"><div><h2>机电系统 AI 运维知识图谱</h2><p>建筑系统拓扑、IFC 三维构件与语义关系同步联动</p></div><div className="head-tools"><Badge tone="green"><span className="live-dot" />IFC {graphData?.meta.asset_count?.toLocaleString() || "—"} 设备已解析</Badge><Badge tone="amber">补充关系为 Demo</Badge><button className="outline" onClick={() => setShowLedger(true)}><Icon name="file" />数据台账</button><button className="primary small" onClick={() => void graphPanelRef.current?.requestFullscreen()}><Icon name="expand" />沉浸分析</button></div></div>
     <div className="kg-layout graph-feedback">
@@ -1090,7 +1135,7 @@ function KnowledgeGraph({ demoAlarm, goAssistant }: { demoAlarm: AirflowAlarmCon
           </div>
         </section>}
         <div className="kg-split">
-          <div className="kg-model-stack"><MiniModel selectedGlobalIds={selectedModelIds} selectedLabel={selectedModelLabel} title="IFC 三维模型" /><SemanticQuery value={semanticQuery} onChange={setSemanticQuery} onSubmit={value => loadGraph(value)} context={`${selectedNode.label} · ${selectedNode.kind}`} count={visibleGraphNodes.length} examples={graphExamples} /></div>
+          <div className="kg-model-stack"><MiniModel selectedGlobalIds={selectedModelIds} selectedLabel={selectedModelLabel} title="IFC 三维模型" /><SemanticQuery value={semanticQuery} onChange={setSemanticQuery} onSubmit={handleGraphSemanticQuery} onObjectClick={value => loadGraph(value)} context={`${selectedNode.label} · ${selectedNode.kind}`} count={visibleGraphNodes.length} examples={graphExamples} /></div>
           <div className="graph-view">
             <div className="model-title"><span><i className="live-dot" />关系网络</span><div><button className={graphMode === "system" ? "mini-active" : ""} onClick={() => setGraphMode("system")}>系统拓扑</button><button className={graphMode === "semantic" ? "mini-active" : ""} onClick={() => setGraphMode("semantic")}>语义关系</button></div></div>
             <div className="graph-filterbar"><span><Icon name="filter" size={14} />领域筛选</span>{entityFilters.map(([kind]) => <label key={kind}><input type="checkbox" checked={visibleKinds[kind] !== false} onChange={event => setVisibleKinds(current => ({ ...current, [kind]: event.target.checked }))} />{kind}</label>)}<button onClick={() => setShowRoomModal(true)}>关系说明</button></div>
@@ -1163,6 +1208,24 @@ function formatAssistantHistoryTime(value: string) {
   const time = `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
   return date.toDateString() === today.toDateString() ? `今天 ${time}` : `${date.getMonth() + 1}月${date.getDate()}日 ${time}`;
 }
+function assistantAssetType(asset: AssetRecord | undefined, assetCode: string) {
+  if (asset?.ifc_class === "IfcFlowTerminal") return "送风末端 / 风口";
+  if (asset?.ifc_class === "IfcFlowSegment") return /pipe|水管|钢管/i.test(asset.name) ? "管道构件" : "风管构件";
+  if (asset?.ifc_class === "IfcFlowController") return "阀门与控制设备";
+  if (/^AHU-/i.test(assetCode)) return "组合式空气处理机组";
+  return asset?.type_name || asset?.ifc_class || "机电设备";
+}
+function assistantAssetDocuments(asset: AssetRecord | undefined, assetCode: string) {
+  if (/^AHU-/i.test(assetCode)) return ["E-01-1 空调机组设备手册.pdf", "麦克维尔 MDM 系列组合式空气处理机组资料.pdf"];
+  if (asset?.ifc_class === "IfcFlowTerminal") return ["空调机组培训卡.pdf", "E-01-1 空调机组设备手册.pdf"];
+  return ["E-01-1 空调机组设备手册.pdf"];
+}
+function assistantMaintenanceHistory(assetCode: string) {
+  if (assetCode === "5466537") return [["2026-09-01", "风口风量复测与校准", "工单 WO-260901-006 · 已完成"], ["2026-07-11", "百叶风口清洁与角度调整", "工单 WO-260711-019 · 已完成"]];
+  if (assetCode === "5466492") return [["2026-08-26", "支管漏风巡检", "工单 WO-260826-014 · 已完成"], ["2026-05-17", "风管连接件紧固", "工单 WO-260517-008 · 已完成"]];
+  if (assetCode === "AHU-0B2-04") return [["2026-08-18", "更换中效过滤器", "工单 WO-260818-027 · 已完成"], ["2026-06-03", "送风机皮带张紧", "工单 WO-260603-011 · 已完成"]];
+  return [["2026-08-12", `${assetCode} 例行巡检`, "工单 WO-DEMO-0812 · 已完成"], ["2026-05-20", "运行状态与连接检查", "工单 WO-DEMO-0520 · 已完成"]];
+}
 function Assistant({ goGraph, demoAlarm }: { goGraph: () => void; demoAlarm: AirflowAlarmContext | null }) {
   const seededQuestion = demoAlarm ? buildAirflowAssistantQuestion(demoAlarm) : initialAssistantQuestion;
   const [input, setInput] = useState("");
@@ -1175,6 +1238,8 @@ function Assistant({ goGraph, demoAlarm }: { goGraph: () => void; demoAlarm: Air
   const [activeHistoryId, setActiveHistoryId] = useState<string | null>(null);
   const [notice, setNotice] = useState("");
   const [response, setResponse] = useState<AssistantResponse>(emptyAssistantResponse);
+  const [assistantAssets, setAssistantAssets] = useState<AssetRecord[]>([]);
+  const [selectedAssetCode, setSelectedAssetCode] = useState(demoAlarm?.assetCode || "AHU-0B2-04");
   const [selectedEvidence, setSelectedEvidence] = useState(0);
   const [previewDocument, setPreviewDocument] = useState<AssistantEvidence | null>(null);
   const [sideTab, setSideTab] = useState<"asset" | "evidence">(demoAlarm ? "evidence" : "asset");
@@ -1194,6 +1259,7 @@ function Assistant({ goGraph, demoAlarm }: { goGraph: () => void; demoAlarm: Air
     setSelectedEvidence(0);
     setPreviewDocument(null);
     setLoading(false);
+    if (item.context?.asset_code) setSelectedAssetCode(item.context.asset_code);
   };
   const requestAnswer = async (nextQuestion: string, context: Record<string, string> = {}) => {
     setAsked(true);
@@ -1214,6 +1280,7 @@ function Assistant({ goGraph, demoAlarm }: { goGraph: () => void; demoAlarm: Air
       setHistoryQuery("");
       setSelectedEvidence(0);
       setSideTab("evidence");
+      if (nextResponse.context?.asset_code) setSelectedAssetCode(nextResponse.context.asset_code);
     } catch (reason) {
       setResponse({
         answer: reason instanceof Error ? reason.message : "助手服务暂不可用，请稍后重试。",
@@ -1225,6 +1292,9 @@ function Assistant({ goGraph, demoAlarm }: { goGraph: () => void; demoAlarm: Air
       setLoading(false);
     }
   };
+  useEffect(() => {
+    fetch("/api/assets?limit=2000").then(result => result.ok ? result.json() : Promise.reject()).then(data => setAssistantAssets(data.items || [])).catch(() => setAssistantAssets([]));
+  }, []);
   useEffect(() => {
     const controller = new AbortController();
     const timer = window.setTimeout(async () => {
@@ -1280,8 +1350,21 @@ function Assistant({ goGraph, demoAlarm }: { goGraph: () => void; demoAlarm: Air
     await requestAnswer(nextQuestion, demoAlarm ? { alarm_id: demoAlarm.alarmId, asset_code: demoAlarm.assetCode, source: "alarm" } : {});
   };
   const activeEvidence = response.evidence[selectedEvidence];
+  const selectedAssistantAsset = assistantAssets.find(asset => asset.asset_code.toUpperCase() === selectedAssetCode.toUpperCase());
+  const assistantModelIds = selectedAssistantAsset?.ifc_global_id ? [selectedAssistantAsset.ifc_global_id] : selectedAssetCode === demoAlarm?.assetCode && demoAlarm?.ifcGlobalId ? [demoAlarm.ifcGlobalId] : [];
+  const selectedAssetType = assistantAssetType(selectedAssistantAsset, selectedAssetCode);
+  const selectedAssetDocuments = assistantAssetDocuments(selectedAssistantAsset, selectedAssetCode);
+  const selectedAssetHistory = assistantMaintenanceHistory(selectedAssetCode);
+  const selectAssistantObject = (value: string) => {
+    if (!isAssetSemanticObject(value)) return;
+    setSelectedAssetCode(value);
+    setSideTab("asset");
+    setNotice(`已定位 ${value}，模型与右侧设备信息已同步更新`);
+  };
   const providerLabel = response.provider === "open-webui" ? "Open WebUI 实时生成" : response.provider === "error" ? "服务异常" : response.provider === "loading" ? "等待提问" : "本地检索 · 模板回答";
   const confidence = !asked || loading ? 0 : response.provider === "open-webui" ? 92 : response.provider === "error" ? 0 : 76;
+  const answerObjectCodes = Array.from(new Set(extractSemanticObjects(`${question} ${response.answer} ${response.steps.join(" ")}`).filter(isAssetSemanticObject)));
+  const visibleAnswerObjects = answerObjectCodes.length > 0 ? answerObjectCodes : [selectedAssetCode];
   return <><div className="page assistant-page">
     <div className="page-head compact"><div><h2>运维智能助手</h2><p>以空间与设备为上下文，联合三维模型、知识图谱和手册知识库辅助处置</p></div><div className="head-tools"><Badge tone="green"><span className="live-dot" />资料检索已接入</Badge><Badge tone="green">4 份 PDF · 67 页</Badge></div></div>
     <div className="assistant-layout">
@@ -1298,20 +1381,20 @@ function Assistant({ goGraph, demoAlarm }: { goGraph: () => void; demoAlarm: Air
         <div className="assistant-cap"><Icon name="spark" /><span><strong>仅基于本地资料回答</strong><small>设备手册、技术样本、培训卡和消防图纸均显示可追溯来源。</small></span></div>
       </aside>
       <div className="assistant-center-stack">
-      <MiniModel selectedGlobalIds={[demoAlarm?.ifcGlobalId || "3nUg2jPlz76PUi_3jscap4"]} selectedLabel={demoAlarm?.assetCode || "AHU-0B2-04"} title="IFC 三维模型" className="assistant-ifc-model" />
+      <MiniModel selectedGlobalIds={assistantModelIds} selectedLabel={selectedAssetCode} title="IFC 三维模型" className="assistant-ifc-model" />
       <main className="panel chat-panel">
         <div className="chat-head"><div><span className="ai-orb"><Icon name="spark" /></span><div><h3>机场运维 Copilot</h3><small><i className="live-dot" />检索范围：机场机电运维资料库</small></div></div><button className="outline" disabled title="当前 Demo 使用固定本地知识库"><Icon name="more" />固定知识库</button></div>
         {demoAlarm && <div className="assistant-flow-context"><span><b>03</b>图谱上下文已带入</span>{airflowContextChips.map(chip => <Badge key={chip} tone={chip.startsWith("路径") ? "amber" : "blue"}>{chip}</Badge>)}</div>}
         <div className="messages">
           {!asked && !loading && <div className="assistant-empty"><span className="ai-orb"><Icon name="spark" /></span><strong>请选择历史记录或输入新的运维问题</strong><p>只有发送问题后才会检索资料；从首页报警进入时会自动启动诊断。</p><button onClick={() => setInput(initialAssistantQuestion)}>使用空调机组示例问题</button></div>}
           {asked && question && <div className="message user-message"><div><strong>运维管理员</strong><span>{question}</span></div><span className="avatar">WD</span></div>}
-          {demoAlarm && <div className="message ai-message"><span className="ai-orb small"><Icon name="graph" size={15} /></span><div className="answer airflow-playbook"><div className="answer-head"><strong>图谱诊断摘要</strong><Badge tone="blue">IFC定位 + 手册规则</Badge></div><p>先确认末端测量，再沿 IFC 连接回溯风管；若同系统多个末端同时偏低，再检查 SA 94 和 AHU-0B2-04。</p><ol>
-            <li><span>01</span><div><strong>复核送风口 5466537</strong><p>用风量罩复测并和设计图、调试报告或已确认基准比较；风量罩操作属于一般工程建议。</p></div><Badge tone="red">先查</Badge></li>
-            <li><span>02</span><div><strong>检查上游风管 5466492</strong><p>检查局部风阀开度、执行器反馈、支管漏风、堵塞和风口遮挡；风口与该风管为 IFC 连接。</p></div></li>
+          {demoAlarm && <div className="message ai-message"><span className="ai-orb small"><Icon name="graph" size={15} /></span><div className="answer airflow-playbook"><div className="answer-head"><strong>图谱诊断摘要</strong><Badge tone="blue">IFC定位 + 手册规则</Badge></div><p><SemanticObjectText text="先确认末端测量，再沿 IFC 连接回溯风管；若同系统多个末端同时偏低，再检查 SA 94 和 AHU-0B2-04。" onObjectClick={selectAssistantObject} assetsOnly /></p><ol>
+            <li><span>01</span><div><strong><SemanticObjectText text="复核送风口 5466537" onObjectClick={selectAssistantObject} assetsOnly /></strong><p>用风量罩复测并和设计图、调试报告或已确认基准比较；风量罩操作属于一般工程建议。</p></div><Badge tone="red">先查</Badge></li>
+            <li><span>02</span><div><strong><SemanticObjectText text="检查上游风管 5466492" onObjectClick={selectAssistantObject} assetsOnly /></strong><p>检查局部风阀开度、执行器反馈、支管漏风、堵塞和风口遮挡；风口与该风管为 IFC 连接。</p></div></li>
             <li><span>03</span><div><strong>判断局部或系统性异常</strong><p>同步测量相邻送风口；单点偏低查局部支路，多点偏低再回溯 SA 94 与空调机组。</p></div></li>
-            <li><span>04</span><div><strong>检查 AHU-0B2-04</strong><p>依次核对过滤器压差、盘管积尘、风机频率与电流、总管静压及系统阻力。</p></div></li>
+            <li><span>04</span><div><strong><SemanticObjectText text="检查 AHU-0B2-04" onObjectClick={selectAssistantObject} assetsOnly /></strong><p>依次核对过滤器压差、盘管积尘、风机频率与电流、总管静压及系统阻力。</p></div></li>
           </ol><div className="playbook-basis"><span><Badge tone="green">手册明确</Badge><b>系统阻力过大、阀门开度不足、过滤器阻力大、换热器积尘会导致风量小。</b><small>《E-01-1 空调机组设备手册》第 6 页</small></span><span><Badge tone="amber">工程建议</Badge><b>风量罩、热球风速仪、微压计；设计图与调试报告作为目标值来源。</b><small>需结合机场测量规程与已确认阈值执行</small></span></div></div></div>}
-          {asked && <div className="message ai-message"><span className="ai-orb small"><Icon name="spark" size={15} /></span><div className="answer"><div className="answer-head"><strong>{loading ? "正在检索机场运维资料…" : "基于运维资料的建议"}</strong><Badge tone={response.provider === "error" ? "red" : response.provider === "open-webui" ? "green" : "amber"}>{loading ? "检索中" : `${providerLabel} · ${response.evidence.length} 条证据`}</Badge></div><p>{loading ? "正在定位设备手册、技术样本和培训资料中的相关内容。" : response.answer}</p>{!loading && response.steps.length > 0 && <ol>{response.steps.map((step, index) => <li key={step}><span>{String(index + 1).padStart(2, "0")}</span><div><strong>{step}</strong><p>请结合现场状态、设备铭牌和已确认的报警阈值执行。</p></div>{index === 0 && <Badge tone="red">优先</Badge>}</li>)}</ol>}<div className="answer-actions"><button onClick={() => setNotice("已生成检查工单草稿 WO-DEMO-AHU-04，可在正式接入工单系统后提交")}><Icon name="work" />生成检查工单</button><button onClick={goGraph}><Icon name="graph" />打开设备图谱</button><span>{loading ? "正在连接 Open WebUI" : providerLabel}</span></div></div></div>}
+          {asked && <div className="message ai-message"><span className="ai-orb small"><Icon name="spark" size={15} /></span><div className="answer"><div className="answer-head"><strong>{loading ? "正在检索机场运维资料…" : "基于运维资料的建议"}</strong><Badge tone={response.provider === "error" ? "red" : response.provider === "open-webui" ? "green" : "amber"}>{loading ? "检索中" : `${providerLabel} · ${response.evidence.length} 条证据`}</Badge></div>{!loading && <div className="answer-object-links"><small>关键对象</small>{visibleAnswerObjects.map(code => <SemanticObjectText key={code} text={code} onObjectClick={selectAssistantObject} assetsOnly />)}</div>}<p>{loading ? "正在定位设备手册、技术样本和培训资料中的相关内容。" : <SemanticObjectText text={response.answer} onObjectClick={selectAssistantObject} assetsOnly />}</p>{!loading && response.steps.length > 0 && <ol>{response.steps.map((step, index) => <li key={step}><span>{String(index + 1).padStart(2, "0")}</span><div><strong><SemanticObjectText text={step} onObjectClick={selectAssistantObject} assetsOnly /></strong><p>请结合现场状态、设备铭牌和已确认的报警阈值执行。</p></div>{index === 0 && <Badge tone="red">优先</Badge>}</li>)}</ol>}<div className="answer-actions"><button onClick={() => setNotice("已生成检查工单草稿 WO-DEMO-AHU-04，可在正式接入工单系统后提交")}><Icon name="work" />生成检查工单</button><button onClick={goGraph}><Icon name="graph" />打开设备图谱</button><span>{loading ? "正在连接 Open WebUI" : providerLabel}</span></div></div></div>}
         </div>
         {notice && <div className="assistant-notice"><Icon name="check" size={14} />{notice}<button onClick={() => setNotice("")}>×</button></div>}
         <div className="suggestions">{suggestions.map(s => <button key={s} onClick={() => setInput(s)}>{s}<Icon name="arrow" size={14} /></button>)}</div>
@@ -1320,11 +1403,11 @@ function Assistant({ goGraph, demoAlarm }: { goGraph: () => void; demoAlarm: Air
             event.preventDefault();
             void send();
           }
-        }} placeholder="询问设备故障、操作步骤、维护标准或历史经验…" /><div><span><button disabled title="Demo 暂不支持上传附件">＋</button><button onClick={() => setNotice(`当前会话已关联设备 ${demoAlarm?.assetCode || "AHU-0B2-04"}`)}><Icon name="link" size={16} />关联 {demoAlarm?.assetCode || "AHU-0B2-04"}</button></span><span><small>Enter 发送 · Shift+Enter 换行</small><button className="send" onClick={() => void send()} aria-label="发送" disabled={loading || !input.trim()}><Icon name="send" /></button></span></div></div>
+        }} placeholder="询问设备故障、操作步骤、维护标准或历史经验…" /><div><span><button disabled title="Demo 暂不支持上传附件">＋</button><button onClick={() => setNotice(`当前会话已关联设备 ${selectedAssetCode}`)}><Icon name="link" size={16} />关联 {selectedAssetCode}</button></span><span><small>Enter 发送 · Shift+Enter 换行</small><button className="send" onClick={() => void send()} aria-label="发送" disabled={loading || !input.trim()}><Icon name="send" /></button></span></div></div>
       </main></div>
       <aside className="panel evidence-panel asset-brief">
         <div className="panel-head"><div><small>{sideTab === "asset" ? "选中设备" : "EVIDENCE"}</small><h3>{sideTab === "asset" ? "设备结构化信息" : "回答依据"}</h3></div><div className="side-tab-switch"><button className={sideTab === "asset" ? "active" : ""} onClick={() => setSideTab("asset")}>设备</button><button className={sideTab === "evidence" ? "active" : ""} onClick={() => setSideTab("evidence")}>依据</button></div></div>
-        {sideTab === "asset" ? <div className="asset-brief-content"><div className="asset-title"><span className="detail-kind primary"><Icon name="activity" /></span><span><strong>AHU-0B2-04</strong><small>组合式空气处理机组</small></span><Badge tone="green">运行</Badge></div><div className="asset-facts">{[["名称", "AHU-0B2-04"], ["类型", "组合式空气处理机组"], ["运行状态", "运行 · 送风温度偏高"], ["所在空间", "T-BE-B1-M18 空调机房"], ["投运年份", "2025 · Demo"]].map(row => <span key={row[0]}><small>{row[0]}</small><strong>{row[1]}</strong></span>)}</div><section className="brief-section"><div><strong>设备资料</strong><Badge tone="blue">2</Badge></div>{["E-01-1 空调机组设备手册.pdf", "麦克维尔 MDM 系列组合式空气处理机组资料.pdf"].map(document => <button key={document} onClick={() => setPreviewDocument({ document, page: 1, content: "设备手册原文预览；内容来自机场机电运维资料库。" })}><Icon name="file" size={15} /><span>{document}</span><Icon name="expand" size={13} /></button>)}</section><section className="brief-section"><div><strong>历史维修记录</strong><Badge tone="amber">Demo</Badge></div><ol><li><time>2026-08-18</time><span><strong>更换中效过滤器</strong><small>工单 WO-260818-027 · 已完成</small></span></li><li><time>2026-06-03</time><span><strong>送风机皮带张紧</strong><small>工单 WO-260603-011 · 已完成</small></span></li></ol></section></div> : <>
+        {sideTab === "asset" ? <div className="asset-brief-content"><div className="asset-title"><span className="detail-kind primary"><Icon name="activity" /></span><span><strong>{selectedAssetCode}</strong><small>{selectedAssetType}</small></span><Badge tone={selectedAssetCode === "5466537" ? "red" : "green"}>{selectedAssetCode === "5466537" ? "报警" : "运行"}</Badge></div><div className="asset-facts">{[["名称", selectedAssistantAsset?.name?.split(":")[0] || selectedAssetCode], ["类型", selectedAssetType], ["运行状态", selectedAssetCode === "5466537" ? "风量不足 · 当前 620 m³/h" : "已接入 · 待现场确认"], ["所在空间", selectedAssistantAsset?.location || "AR_-7.000 / B1"], ["所属系统", selectedAssistantAsset?.system || "待从知识图谱确认"]].map(row => <span key={row[0]}><small>{row[0]}</small><strong>{row[1]}</strong></span>)}</div><section className="brief-section"><div><strong>设备资料</strong><Badge tone="blue">{selectedAssetDocuments.length}</Badge></div>{selectedAssetDocuments.map(document => <button key={document} onClick={() => setPreviewDocument({ document, page: 1, content: `${selectedAssetCode} 关联资料原文预览；内容来自机场机电运维资料库。` })}><Icon name="file" size={15} /><span>{document}</span><Icon name="expand" size={13} /></button>)}</section><section className="brief-section"><div><strong>历史维修记录</strong><Badge tone="amber">Demo</Badge></div><ol>{selectedAssetHistory.map(record => <li key={`${selectedAssetCode}-${record[0]}`}><time>{record[0]}</time><span><strong>{record[1]}</strong><small>{record[2]}</small></span></li>)}</ol></section></div> : <>
         <div className="confidence"><div><strong>{confidence}%</strong><span>{response.provider === "open-webui" ? "回答置信度" : "检索匹配度"}</span></div><span><i style={{ width: `${confidence}%` }} /></span><small>{response.evidence.length} 项资料证据</small></div>
         <div className="evidence-list">
           {loading && <div className="evidence-empty">正在检索资料…</div>}
@@ -1345,7 +1428,7 @@ function EnhancementStyles() {
     .login-bg{background-image:url('/login-bg-wireframe.png');background-image:image-set(url('/login-bg-wireframe.webp') type('image/webp'),url('/login-bg-wireframe.png') type('image/png'));filter:none;background-position:center center}.login-error,.ledger-error{margin:-8px 0 12px;padding:8px 10px;background:#f7e9e8;color:#a33e39;border:1px solid #e8c3c0;font-size:10px}.ledger-error{margin:12px 22px}
     .real-pdf iframe{display:block;width:100%;height:100%;border:0;background:#fff}.real-data-label{position:absolute;left:12px;bottom:12px;background:rgba(255,255,255,.92);border:1px solid var(--line);padding:7px 10px;font:500 8px 'IBM Plex Mono';color:var(--green);display:flex;align-items:center;gap:7px}.drawing-empty{align-items:center;justify-content:center;gap:8px;color:var(--muted)}.drawing-empty strong{font-size:12px;color:var(--ink)}.drawing-empty span{font-size:9px}.model-webgl{width:100%;height:calc(100% - 42px)}.model-webgl canvas{display:block;width:100%;height:100%}.model-loading{position:absolute;inset:42px 0 0;display:flex;align-items:center;justify-content:center;gap:9px;background:rgba(240,244,245,.9);font-size:10px;color:var(--blue);z-index:2}.model-loading .spinner{border-color:rgba(45,111,147,.2);border-top-color:var(--blue)}.model-error{color:var(--red)}.graph-loading{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:9px}.graph-loading .spinner{border-color:rgba(45,111,147,.2);border-top-color:var(--blue)}.graph-loading small{color:var(--muted)}
     button:disabled{cursor:not-allowed;opacity:.48}.kg-layout.filters-collapsed{grid-template-columns:1fr}.kg-sidebar.collapsed{display:none}.kg-main:fullscreen{width:100vw;height:100vh;background:#fff}.model-controls button.mini-active{background:#e8f1f5;color:var(--blue)}.assistant-notice{margin:0 15px 4px;padding:8px 10px;background:#e8f2ed;color:var(--green);display:flex;align-items:center;gap:7px;font-size:8px}.assistant-notice button{margin-left:auto;color:var(--green);font-size:15px}.range-label span{font-size:7px;line-height:1.4}
-    .asset-tree{max-height:265px;overflow:auto;padding:2px 0 11px;border-bottom:1px solid var(--line)}.asset-tree-head{display:flex;align-items:center;justify-content:space-between;padding:2px 3px 8px}.asset-tree-head>small{font:600 10px 'IBM Plex Mono';letter-spacing:.12em;color:#74848c}.asset-group-button{width:100%;display:flex;align-items:center;gap:6px;padding:8px 5px;text-align:left;font-size:11px;font-weight:600}.asset-group-button:hover{background:#f4f7f8}.asset-group-button.selected{background:#e6f1f5;color:var(--deep);box-shadow:inset 3px 0 var(--blue)}.asset-group-button svg{transform:rotate(90deg)}.asset-group-button b{margin-left:auto;font:500 9px 'IBM Plex Mono';color:var(--muted)}.asset-items{margin-left:7px;border-left:1px solid #d9e2e6;padding-left:7px}.asset-items button{width:100%;display:flex;align-items:center;gap:7px;text-align:left;padding:7px 6px;border-radius:2px}.asset-items button:hover,.asset-items button.selected{background:#eaf2f5;color:var(--blue)}.asset-items button>i{width:6px;height:6px;flex:0 0 6px;border-radius:50%;background:#7d919b}.asset-items button.selected>i{background:var(--blue);box-shadow:0 0 0 3px rgba(45,111,147,.13)}.asset-items button>span{min-width:0}.asset-items strong,.asset-items small{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.asset-items strong{font:600 10px 'IBM Plex Mono'}.asset-items small{font-size:9px;color:var(--muted);margin-top:2px}.graph-view>svg{touch-action:none;user-select:none}.kg-node{cursor:grab}.kg-node:active{cursor:grabbing}.kg-node rect{transition:stroke .16s,fill .16s}.kg-node.selected rect{filter:drop-shadow(0 5px 7px rgba(30,67,84,.22))}
+    .asset-tree{max-height:265px;overflow:auto;padding:2px 0 11px;border-bottom:1px solid var(--line)}.asset-tree-head{display:flex;align-items:center;justify-content:space-between;padding:2px 3px 8px}.asset-tree-head>small{font:600 10px 'IBM Plex Mono';letter-spacing:.12em;color:#74848c}.asset-group-button{width:100%;display:flex;align-items:center;gap:6px;padding:8px 5px;text-align:left;font-size:11px;font-weight:600}.asset-group-button:hover{background:#f4f7f8}.asset-group-button.selected{background:#e6f1f5;color:var(--deep);box-shadow:inset 3px 0 var(--blue)}.asset-group-button svg{transform:rotate(90deg)}.asset-group-button b{margin-left:auto;font:500 9px 'IBM Plex Mono';color:var(--muted)}.asset-items{margin-left:7px;border-left:1px solid #d9e2e6;padding-left:7px}.asset-items button{width:100%;display:flex;align-items:center;gap:7px;text-align:left;padding:7px 6px;border-radius:2px}.asset-items button:hover,.asset-items button.selected{background:#eaf2f5;color:var(--blue)}.asset-items button>i{width:6px;height:6px;flex:0 0 6px;border-radius:50%;background:#7d919b}.asset-items button.selected>i{background:var(--blue);box-shadow:0 0 0 3px rgba(45,111,147,.13)}.asset-items button>span{min-width:0}.asset-items strong,.asset-items small{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.asset-items strong{font:600 10px 'IBM Plex Mono'}.asset-items small{font-size:9px;color:var(--muted);margin-top:2px}.graph-view>svg{touch-action:none;user-select:none}.kg-node{cursor:grab}.kg-node:active{cursor:grabbing}.kg-node rect{transition:stroke .16s,fill .16s}.kg-node.selected rect{filter:drop-shadow(0 5px 7px rgba(30,67,84,.22))}.answer-object-links{display:flex;align-items:center;gap:7px;flex-wrap:wrap;margin:9px 0 2px;padding:7px 9px;background:#f1f7f9;border-left:2px solid var(--blue)}.answer-object-links small{font-size:9px;color:var(--muted);margin-right:2px}.answer-object-links .semantic-object-link{padding:2px 5px;background:#fff;border:1px solid #b9d0da;border-radius:2px;text-decoration:none}
     .page .eyebrow{font-size:11px}.page .badge{font-size:10px}.page .outline,.page .text-button{font-size:11px}.page .panel-head small{font-size:10px}.page .panel-head h3{font-size:16px}.home-page .metric-copy small{font-size:12px}.home-page .metric-copy>span,.home-page .alarm-summary span,.home-page .work-legend span{font-size:11px}.home-page .alarm-list strong{font-size:12px}.home-page .alarm-list small,.home-page .alarm-list time,.home-page .map-legend{font-size:10px}.home-page .seg button{font-size:10px}.drawing-page .tree,.drawing-page .discipline-list button,.drawing-page .nl-search input{font-size:12px}.drawing-page .tree button b,.drawing-page .discipline-list b{font-size:10px}.drawing-page .query-hint,.drawing-page .result-filter,.drawing-page .version-note small{font-size:10px}.drawing-page .drawing-toolbar strong,.drawing-page .drawing-toolbar span,.drawing-page .drawing-results strong{font-size:11px}.drawing-page .drawing-results small,.drawing-page .drawing-results em{font-size:9px}.graph-page .kg-search input,.graph-page .model-title{font-size:11px}.graph-page .kg-section>small{font-size:10px}.graph-page .kg-section>label:not(.check-row),.graph-page .check-row,.graph-page .relation-key span{font-size:11px}.graph-page .range-label span,.graph-page .source-note small{font-size:9px}.graph-page .source-note strong{font-size:11px}.graph-page .node-label{font-size:11px}.graph-page .node-kind,.graph-page .edge-label{font-size:9px}.graph-page .graph-controls span,.graph-page .model-stats span{font-size:9px}.graph-page .detail-head small,.graph-page .property-grid small,.graph-page .relation-cards>div>span{font-size:10px}.graph-page .detail-head h3,.graph-page .property-grid strong,.graph-page .relation-cards strong{font-size:11px}.graph-page .detail-tabs button,.graph-page .point-table{font-size:10px}.assistant-page .kb-scope small,.assistant-page .group-label,.assistant-page .conv small,.assistant-page .chat-head small,.assistant-page .evidence-list small,.assistant-page .evidence-list p,.assistant-page .evidence-preview small{font-size:9px}.assistant-page .kb-scope strong,.assistant-page .conv strong,.assistant-page .answer li strong,.assistant-page .evidence-list strong,.assistant-page .evidence-preview strong{font-size:11px}.assistant-page .answer>p,.assistant-page .answer li p,.assistant-page .user-message div>span,.assistant-page .composer textarea{font-size:11px}.assistant-page .suggestions button,.assistant-page .answer-actions button,.assistant-page .evidence-preview p,.assistant-page .evidence-preview button{font-size:10px}
     .demo-journey{margin:0 0 12px;border:1px solid #e1b3af;background:#fff;box-shadow:0 8px 24px rgba(105,45,40,.07)}.journey-progress{height:32px;padding:0 16px;display:flex;align-items:center;gap:10px;background:#f8fafb;border-bottom:1px solid var(--line);color:#7b898f;font-size:10px}.journey-progress span{display:flex;align-items:center;gap:6px;white-space:nowrap}.journey-progress span.active{color:var(--red);font-weight:600}.journey-progress b{font:600 9px 'IBM Plex Mono'}.journey-progress i{width:52px;border-top:1px solid #cdd7db}.journey-alert{min-height:72px;padding:10px 14px;display:flex;align-items:center;gap:13px}.journey-severity{width:38px;height:38px;flex:0 0 38px;display:grid;place-items:center;background:#f6e9e8;color:var(--red)}.journey-copy{min-width:210px;flex:1}.journey-copy small,.journey-copy strong,.journey-copy em{display:block}.journey-copy small{font:600 9px 'IBM Plex Mono';color:var(--red)}.journey-copy strong{font-size:15px;margin:2px 0}.journey-copy em{font-size:10px;font-style:normal;color:var(--muted)}.journey-reading{min-width:190px;padding-left:15px;border-left:1px solid var(--line)}.journey-reading small,.journey-reading strong,.journey-reading b{display:block}.journey-reading small{font-size:9px;color:var(--muted)}.journey-reading strong{font:600 20px 'IBM Plex Mono';margin:2px 0}.journey-reading strong em{font:500 10px 'Noto Sans SC';font-style:normal}.journey-reading b{font:600 9px 'IBM Plex Mono';color:var(--red)}.journey-alert>.primary{height:38px;display:flex;align-items:center;gap:8px;padding:0 14px;white-space:nowrap}
     .diagnosis-runway{flex:0 0 auto;border-bottom:1px solid var(--line);background:#f9fbfb}.runway-title{height:32px;padding:0 12px;display:flex;align-items:center;gap:8px}.runway-title>span{display:flex;align-items:center;gap:6px;color:var(--red)}.runway-title>span svg{width:14px}.runway-title>span b{font:600 9px 'IBM Plex Mono'}.runway-title>small{margin-left:auto;font-size:9px;color:var(--muted)}.runway-steps{display:grid;grid-template-columns:repeat(4,minmax(120px,1fr)) auto;border-top:1px solid #e7ecee}.runway-steps>button:not(.runway-cta){min-width:0;display:flex;align-items:center;gap:8px;text-align:left;padding:8px 10px;border-right:1px solid #e1e7e9}.runway-steps>button:not(.runway-cta):hover,.runway-steps>button.active{background:#eaf2f5}.runway-steps>button>b{font:600 10px 'IBM Plex Mono';color:var(--blue)}.runway-steps button span{min-width:0}.runway-steps strong,.runway-steps small{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.runway-steps strong{font-size:10px}.runway-steps small{font-size:8px;color:var(--muted);margin-top:2px}.runway-cta{align-self:stretch;padding:0 12px;background:var(--deep);color:#fff;display:flex;align-items:center;justify-content:center;gap:6px;font-size:10px;white-space:nowrap}.kg-node.node-alarm rect{fill:#f8eae9;stroke:var(--red);stroke-width:2}.kg-node.node-alarm circle{fill:var(--red)}
@@ -1355,7 +1438,7 @@ function EnhancementStyles() {
     .home-main-grid{grid-template-columns:minmax(0,1.72fr) minmax(350px,.68fr);min-height:calc(100vh - 300px)}.home-main-grid .campus-panel{height:auto;min-height:620px;display:flex;flex-direction:column}.home-main-grid .floor-map{height:auto;flex:1;min-height:500px}.home-right-stack{display:flex;flex-direction:column;gap:12px;min-width:0}.home-right-stack .alarm-panel{height:auto;flex:1;min-height:0}.home-right-stack .work-panel{height:205px;flex:0 0 205px}.home-right-stack .work-body{height:135px;gap:22px}.home-right-stack .work-donut{width:88px;height:88px}.home-right-stack .work-donut:after{width:60px;height:60px}.home-bottom-grid{grid-template-columns:1fr}.home-page .alarm-list{overflow:auto}.home-page .alarm-row{display:grid;grid-template-columns:minmax(0,1fr) auto;border-bottom:1px solid #eef2f3}.home-page .alarm-select{width:100%;display:flex;align-items:flex-start;text-align:left;padding:11px 4px;gap:9px}.home-page .alarm-select>span{flex:1;min-width:0}.home-page .alarm-select strong,.home-page .alarm-select small{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.home-page .alarm-select time{margin-left:auto;white-space:nowrap}.home-page .alarm-select:disabled{opacity:1;color:inherit}.alarm-diagnose{margin:7px 8px 7px 0;padding:0 9px;display:flex;align-items:center;gap:5px;background:var(--deep);color:#fff;border-radius:3px;font-size:10px;font-weight:600;white-space:nowrap}.alarm-diagnose:hover{background:#103d55}.home-right-stack .alarm-list button{border-bottom:0}.home-right-stack .alarm-list .alarm-row:hover{background:#fafcfc}
     .home-page .alarm-row.selected{background:#fff6e5}.home-page .alarm-row.selected .alarm-select strong{color:var(--deep)}.selected-pin{stroke:#fff;stroke-width:3;filter:drop-shadow(0 0 5px rgba(185,75,69,.65))}.home-model-location{position:absolute;left:13px;top:14px;display:flex;flex-direction:column;align-items:flex-start;gap:4px;padding:10px 12px;background:rgba(255,255,255,.95);border:1px solid #e4b5b1;box-shadow:0 8px 20px rgba(105,45,40,.12)}.home-model-location strong{font:600 11px 'IBM Plex Mono';color:var(--ink)}.home-model-location small{font-size:9px;color:var(--muted)}
     .home-page{height:100%;min-height:0;display:flex;flex-direction:column;overflow:hidden;padding-bottom:14px}.home-page .page-head,.home-page .metric-grid{flex:0 0 auto}.home-page .metric-grid{grid-template-columns:repeat(3,1fr)}.home-feedback-grid{display:grid;grid-template-columns:minmax(0,1.72fr) minmax(360px,.68fr);gap:12px;flex:1;height:auto;min-height:0;margin-top:12px;overflow:hidden}.home-feedback-grid .campus-panel{height:auto;min-height:0;display:flex;flex-direction:column;overflow:hidden}.home-ifc-model{flex:1;min-height:0;border:0;border-top:1px solid var(--line);border-radius:0}.home-feedback-grid .home-right-stack{height:100%;min-height:0;overflow:hidden}.home-feedback-grid .alarm-panel{flex:1;min-height:0;display:flex;flex-direction:column}.home-feedback-grid .alarm-list{flex:1;min-height:0}.home-feedback-grid .work-panel{height:205px;flex:0 0 205px}.alarm-select em{font:500 9px 'IBM Plex Mono';font-style:normal;color:var(--amber);margin-left:5px}.home-ifc-model .model-loading{background:rgba(240,244,245,.82)}
-    .feedback-three-column{display:grid;grid-template-columns:236px minmax(520px,1fr) 330px;gap:12px;height:calc(100vh - 154px);min-height:650px}.feedback-tree,.feedback-results{overflow:hidden}.drawings-feedback .feedback-tree{display:flex;flex-direction:column}.drawings-feedback .drawing-tree{max-height:none;min-height:0;flex:1}.drawing-tree .room-tree-branch.active>.demo-room{background:#eef4f6;color:var(--deep)}.drawing-tree .demo-room .badge{padding:2px 4px;font-size:7px;margin-left:auto}.drawing-center-feedback{min-width:0;display:flex;flex-direction:column;overflow:hidden}.drawing-ifc-model{flex:1;min-height:0;border:0;border-radius:0}.semantic-query{flex:0 0 auto;border-top:1px solid var(--line);padding:12px 14px;background:#fff;overflow:auto}.drawing-center-feedback>.semantic-query,.kg-model-stack>.semantic-query{flex:0 0 33.333%;min-height:210px}.semantic-head{display:flex;align-items:center;gap:9px}.semantic-head>div{flex:1}.semantic-head small,.semantic-head strong{display:block}.semantic-head small{font:500 9px 'IBM Plex Mono';letter-spacing:.08em;color:var(--muted)}.semantic-head strong{font-size:11px;margin-top:2px}.semantic-input{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px;margin-top:10px}.semantic-input input{height:38px;border:1px solid #afc0c8;padding:0 11px;outline:0;font-size:11px}.semantic-input input:focus{border-color:var(--blue);box-shadow:0 0 0 3px rgba(45,111,147,.1)}.semantic-input .primary{height:38px}.semantic-samples{display:flex;align-items:center;gap:6px;margin-top:8px;overflow:hidden}.semantic-samples button{white-space:nowrap;background:#eef4f6;color:#477083;padding:6px 8px;font-size:9px}.semantic-samples button.active{background:#dcecf3;color:var(--deep);box-shadow:inset 0 -2px var(--blue)}.semantic-answer{display:flex;align-items:flex-start;gap:9px;margin-top:10px;padding:11px 12px;background:#f1f7f9;border-left:3px solid var(--blue);color:#536871;font-size:10px;line-height:1.65}.semantic-answer svg{flex:0 0 15px;color:var(--blue);margin-top:2px}.semantic-answer strong{display:block;color:var(--deep);font-size:10px;margin-bottom:2px}.feedback-results{display:flex;flex-direction:column}.feedback-results .drawing-results{flex:1;min-height:0;overflow:auto}.drawing-preview-entry{height:38px;margin:0 12px 12px;width:calc(100% - 24px)}.drawing-preview-backdrop{position:fixed;inset:0;z-index:1190;display:grid;place-items:center;padding:5vh 5vw;background:rgba(15,31,39,.52);backdrop-filter:blur(4px)}.drawing-preview-shell{position:relative;z-index:1200;width:min(1180px,90vw);height:min(900px,88vh);min-width:640px;display:flex;flex-direction:column;background:#fff;border:1px solid #aebdc4;border-radius:5px;box-shadow:0 26px 80px rgba(9,25,34,.34);overflow:hidden}.drawing-preview-shell>header{min-height:64px;padding:12px 14px 10px 18px;display:flex;align-items:center;justify-content:space-between;gap:18px;border-bottom:1px solid var(--line);background:linear-gradient(100deg,#fff,#f1f6f7)}.drawing-preview-shell>header small,.drawing-preview-shell>header strong{display:block}.drawing-preview-shell>header small{font:600 9px 'IBM Plex Mono';letter-spacing:.08em;color:var(--blue)}.drawing-preview-shell>header strong{font-size:13px;margin-top:4px}.drawing-preview-shell>header button{width:34px;height:34px;border:1px solid var(--line);background:#fff;font-size:23px}.drawing-preview-shell>.drawing-canvas{flex:1;min-height:0;border:0;border-radius:0}.drawing-preview-shell>footer{height:46px;flex:0 0 46px;padding:0 14px 0 18px;display:flex;align-items:center;justify-content:space-between;border-top:1px solid var(--line)}.drawing-preview-shell>footer span{font-size:9px;color:var(--muted)}.drawing-preview-shell>footer button{height:29px;padding:0 12px;background:var(--deep);color:#fff;border-radius:3px;font-size:10px}
+    .feedback-three-column{display:grid;grid-template-columns:236px minmax(520px,1fr) 330px;gap:12px;height:calc(100vh - 154px);min-height:650px}.feedback-tree,.feedback-results{overflow:hidden}.drawings-feedback .feedback-tree{display:flex;flex-direction:column}.drawings-feedback .drawing-tree{max-height:none;min-height:0;flex:1}.drawing-tree .room-tree-branch.active>.demo-room{background:#eef4f6;color:var(--deep)}.drawing-tree .demo-room .badge{padding:2px 4px;font-size:7px;margin-left:auto}.drawing-center-feedback{min-width:0;display:flex;flex-direction:column;overflow:hidden}.drawing-ifc-model{flex:1;min-height:0;border:0;border-radius:0}.semantic-query{flex:0 0 auto;border-top:1px solid var(--line);padding:12px 14px;background:#fff;overflow:auto}.drawing-center-feedback>.semantic-query,.kg-model-stack>.semantic-query{flex:0 0 33.333%;min-height:210px}.semantic-head{display:flex;align-items:center;gap:9px}.semantic-head>div{flex:1}.semantic-head small,.semantic-head strong{display:block}.semantic-head small{font:500 9px 'IBM Plex Mono';letter-spacing:.08em;color:var(--muted)}.semantic-head strong{font-size:11px;margin-top:2px}.semantic-input{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px;margin-top:10px}.semantic-input input{height:38px;border:1px solid #afc0c8;padding:0 11px;outline:0;font-size:11px}.semantic-input input:focus{border-color:var(--blue);box-shadow:0 0 0 3px rgba(45,111,147,.1)}.semantic-input .primary{height:38px}.semantic-samples{display:flex;align-items:center;gap:6px;margin-top:8px;overflow:hidden}.semantic-samples button{white-space:nowrap;background:#eef4f6;color:#477083;padding:6px 8px;font-size:9px}.semantic-samples button.active{background:#dcecf3;color:var(--deep);box-shadow:inset 0 -2px var(--blue)}.semantic-answer{display:flex;align-items:flex-start;gap:9px;margin-top:10px;padding:11px 12px;background:#f1f7f9;border-left:3px solid var(--blue);color:#536871;font-size:10px;line-height:1.65}.semantic-answer svg{flex:0 0 15px;color:var(--blue);margin-top:2px}.semantic-answer strong{display:block;color:var(--deep);font-size:10px;margin-bottom:2px}.semantic-object-link{display:inline!important;color:var(--blue);font:600 1em 'IBM Plex Mono';text-decoration:underline;text-underline-offset:2px}.semantic-object-link:hover{color:var(--deep);background:#dcecf3}.feedback-results{display:flex;flex-direction:column}.feedback-results .drawing-results{flex:1;min-height:0;overflow:auto}.drawing-preview-entry{height:38px;margin:0 12px 12px;width:calc(100% - 24px)}.drawing-preview-backdrop{position:fixed;inset:0;z-index:1190;display:grid;place-items:center;padding:5vh 5vw;background:rgba(15,31,39,.52);backdrop-filter:blur(4px)}.drawing-preview-shell{position:relative;z-index:1200;width:min(1180px,90vw);height:min(900px,88vh);min-width:640px;display:flex;flex-direction:column;background:#fff;border:1px solid #aebdc4;border-radius:5px;box-shadow:0 26px 80px rgba(9,25,34,.34);overflow:hidden}.drawing-preview-shell>header{min-height:64px;padding:12px 14px 10px 18px;display:flex;align-items:center;justify-content:space-between;gap:18px;border-bottom:1px solid var(--line);background:linear-gradient(100deg,#fff,#f1f6f7)}.drawing-preview-shell>header small,.drawing-preview-shell>header strong{display:block}.drawing-preview-shell>header small{font:600 9px 'IBM Plex Mono';letter-spacing:.08em;color:var(--blue)}.drawing-preview-shell>header strong{font-size:13px;margin-top:4px}.drawing-preview-shell>header button{width:34px;height:34px;border:1px solid var(--line);background:#fff;font-size:23px}.drawing-preview-shell>.drawing-canvas{flex:1;min-height:0;border:0;border-radius:0}.drawing-preview-shell>footer{height:46px;flex:0 0 46px;padding:0 14px 0 18px;display:flex;align-items:center;justify-content:space-between;border-top:1px solid var(--line)}.drawing-preview-shell>footer span{font-size:9px;color:var(--muted)}.drawing-preview-shell>footer button{height:29px;padding:0 12px;background:var(--deep);color:#fff;border-radius:3px;font-size:10px}
     .graph-feedback .entity-filter-sidebar{display:none}.kg-model-stack{min-width:0;min-height:0;display:flex;flex-direction:column;border-right:1px solid var(--line)}.kg-model-stack>.model-view{flex:1;min-height:0;border-right:0}.graph-view{display:flex;flex-direction:column}.graph-filterbar{height:44px;flex:0 0 44px;display:flex;align-items:center;gap:10px;padding:0 12px;border-bottom:1px solid var(--line);background:#fff;font-size:9px}.graph-filterbar>span{display:flex;align-items:center;gap:5px;color:#5b6b73;font-weight:600}.graph-filterbar label{display:flex;align-items:center;gap:4px;white-space:nowrap}.graph-filterbar input{accent-color:var(--blue)}.graph-filterbar button{margin-left:auto;color:#8f661e;background:#fff5df;padding:6px 8px}.graph-view>svg{flex:1;min-height:0;height:auto}.graph-interactive{cursor:grab}.graph-interactive:active{cursor:grabbing}.graph-view>.graph-controls{bottom:67px}.selected-node-strip{height:58px;flex:0 0 58px;display:flex;align-items:center;gap:9px;padding:0 12px;border-top:1px solid var(--line);background:#fff}.selected-node-strip>span:nth-child(2){flex:1;min-width:0}.selected-node-strip small,.selected-node-strip strong{display:block}.selected-node-strip small{font-size:8px;color:var(--muted)}.selected-node-strip strong{font:600 10px 'IBM Plex Mono';margin-top:2px}.selected-node-strip>button{display:flex;align-items:center;gap:5px;color:var(--blue);font-size:9px}.graph-feedback .kg-details{position:absolute;z-index:8;left:225px;right:0;bottom:0;height:210px;background:#fff;box-shadow:0 -12px 28px rgba(27,49,60,.12)}
     .assistant-center-stack{min-width:0;min-height:0;display:grid;grid-template-rows:minmax(260px,44%) minmax(330px,56%);gap:12px}.assistant-ifc-model{min-height:0;border:1px solid var(--line);border-radius:4px}.assistant-center-stack .chat-panel{min-height:0}.side-tab-switch{display:flex;background:#f0f4f5;padding:2px}.side-tab-switch button{padding:5px 8px;font-size:9px;color:var(--muted)}.side-tab-switch button.active{background:#fff;color:var(--blue);box-shadow:0 1px 4px rgba(20,48,61,.12)}.asset-brief-content{padding:0 2px}.asset-title{display:flex;align-items:center;gap:9px;padding:14px 2px;border-bottom:1px solid var(--line)}.asset-title>span:nth-child(2){flex:1}.asset-title strong,.asset-title small{display:block}.asset-title strong{font:600 12px 'IBM Plex Mono'}.asset-title small{font-size:9px;color:var(--muted);margin-top:3px}.asset-facts{padding:6px 0}.asset-facts>span{display:grid;grid-template-columns:90px 1fr;gap:8px;padding:8px 4px;border-bottom:1px solid #edf1f2}.asset-facts small{font-size:9px;color:var(--muted)}.asset-facts strong{font-size:10px}.brief-section{margin-top:12px;border-top:1px solid var(--line);padding-top:12px}.brief-section>div{display:flex;align-items:center;justify-content:space-between;margin-bottom:7px}.brief-section>div>strong{font-size:10px}.brief-section>button{width:100%;display:flex;align-items:center;gap:7px;text-align:left;padding:8px 5px;border-bottom:1px solid #edf1f2;color:var(--blue);font-size:9px}.brief-section>button span{flex:1;color:var(--ink)}.brief-section ol{list-style:none;margin:0;padding:0}.brief-section li{display:flex;gap:9px;padding:8px 4px;border-bottom:1px solid #edf1f2}.brief-section time{font:8px 'IBM Plex Mono';color:var(--muted)}.brief-section li strong,.brief-section li small{display:block}.brief-section li strong{font-size:9px}.brief-section li small{font-size:8px;color:var(--muted);margin-top:2px}
     @media(max-width:1350px){.feedback-three-column{grid-template-columns:205px minmax(500px,1fr) 285px}.graph-filterbar{gap:6px}.graph-filterbar label{font-size:8px}.assistant-layout{grid-template-columns:205px minmax(500px,1fr) 285px}}

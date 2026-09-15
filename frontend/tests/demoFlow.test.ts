@@ -22,7 +22,7 @@ test("assistant handoff carries alarm, IFC and demo relation provenance", () => 
 });
 
 test("guided flow exposes all three page transitions and preserves the existing demo", () => {
-  assert.match(component, /开始 AI 诊断/);
+  assert.match(component, /开始诊断/);
   assert.match(component, /复核末端风量/);
   assert.match(component, /咨询运维助手/);
   assert.match(component, /图谱上下文已带入/);
