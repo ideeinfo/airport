@@ -18,3 +18,9 @@ test("offers preset questions for multiple real IFC assets", () => {
   assert.match(component, /阀门 5500084 卡滞如何排查/);
   assert.match(component, /波纹补偿器 5466510 巡检重点是什么/);
 });
+
+test("places assistant presets below the composer in a single scrolling row", () => {
+  assert.match(component, /className="composer"[\s\S]*className="suggestion-section"/);
+  assert.match(component, /\.assistant-page \.suggestions\{display:flex;align-items:center;gap:6px;overflow-x:auto/);
+  assert.match(component, /\.assistant-page \.suggestions button\{[^}]*white-space:nowrap/);
+});
