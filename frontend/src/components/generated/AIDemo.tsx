@@ -205,22 +205,85 @@ function MetricCard({
 }) {
   return <button className="metric-card" onClick={onClick}><span className={`metric-icon ${tone}`}><Icon name={icon} /></span><span className="metric-copy"><small>{label}</small><strong>{value}<em>{unit}</em></strong><span>{sub}</span></span><Icon name="chevron" size={16} /></button>;
 }
-const energyBars = [42, 55, 49, 63, 72, 67, 78, 81, 75, 88, 70, 64];
 type DashboardData = {
   equipment: { total: number; running: number; fault: number };
   energy: { today_mwh: number; hvac_mwh: number; yoy_percent: number };
   alarms: { total: number; critical: number; general: number };
   work_orders: { today: number; done: number; doing: number; todo: number };
 };
-function Home({
-  goGraph,
-  startAirflowDemo
+type HomeAlarm = {
+  id: string;
+  assetCode: string;
+  label: string;
+  space: string;
+  detail: string;
+  time: string;
+  severity: "high" | "mid";
+  ifcGlobalId: string;
+};
+const homeAlarms: HomeAlarm[] = [{
+  id: "airflow-low",
+  assetCode: "5466537",
+  label: "送风口 5466537 风量不足",
+  space: airflowAlarm.location,
+  detail: `当前 ${airflowAlarm.currentAirflow} / 参考 ${airflowAlarm.referenceAirflow} m³/h · ${airflowDeviationPercent()}%`,
+  time: "10:08",
+  severity: "high",
+  ifcGlobalId: airflowAlarm.ifcGlobalId
+}, {
+  id: "pump-current",
+  assetCode: "CHWP-02",
+  label: "CHWP-02 运行电流异常",
+  space: "B1 冷冻机房",
+  detail: "超过阈值 12% · 持续 30 分钟",
+  time: "09:56",
+  severity: "high",
+  ifcGlobalId: "2LnU_nN4n7j8uYrOc9CFQJ"
+}, {
+  id: "vav-offline",
+  assetCode: "VAV-L2-113",
+  label: "VAV-L2-113 通信中断",
+  space: "L2 候机区机电间",
+  detail: "离线 32 分钟 · DI 状态丢失",
+  time: "09:41",
+  severity: "mid",
+  ifcGlobalId: "2LnU_nN4n7j8uYrOc9C7Eq"
+}, {
+  id: "filter-pressure",
+  assetCode: "FAF-B1-08",
+  label: "FAF-B1-08 滤网压差预警",
+  space: "B1 新风机房",
+  detail: "压差 286 Pa · 建议维护",
+  time: "09:22",
+  severity: "mid",
+  ifcGlobalId: "2LnU_nN4n7j8uYrOc9CFJd"
+}];
+function SemanticQuery({
+  value,
+  onChange,
+  onSubmit,
+  context,
+  count,
+  loading,
+  error
 }: {
-  goGraph: () => void;
-  startAirflowDemo: () => void;
+  value: string;
+  onChange: (value: string) => void;
+  onSubmit: (value: string) => void;
+  context: string;
+  count?: number;
+  loading?: boolean;
+  error?: string;
 }) {
-  const [range, setRange] = useState("今日");
-  const [locatedAlarm, setLocatedAlarm] = useState<string | null>(null);
+  const samples = ["有哪些暖通设备？", "查最新版本图纸", "当前报警关联哪里？"];
+  return <section className="semantic-query compact-query">
+    <div className="semantic-head"><span className="ai-square"><Icon name="spark" /></span><div><small>语义问答查询</small><strong>基于当前空间与业务上下文</strong></div>{typeof count === "number" && <Badge tone="blue">{count} 个匹配</Badge>}</div>
+    <div className="semantic-input"><input value={value} onChange={event => onChange(event.target.value)} placeholder={`询问 ${context} 的设备、系统或图纸…`} onKeyDown={event => event.key === "Enter" && onSubmit(value)} /><button className="primary" onClick={() => onSubmit(value)} disabled={loading || !value.trim()}><Icon name="search" />{loading ? "检索中" : "查询"}</button></div>
+    <div className="semantic-samples">{samples.map(sample => <button key={sample} onClick={() => { onChange(sample); onSubmit(sample); }}>{sample}</button>)}{error && <Badge tone="red">{error}</Badge>}</div>
+  </section>;
+}
+function Home({ startAirflowDemo }: { startAirflowDemo: () => void }) {
+  const [locatedAlarm, setLocatedAlarm] = useState<HomeAlarm>(homeAlarms[0]);
   const [dashboard, setDashboard] = useState<DashboardData | null>(null);
   useEffect(() => {
     fetch("/api/dashboard").then(response => response.ok ? response.json() : Promise.reject()).then(setDashboard).catch(() => setDashboard(null));
@@ -234,52 +297,30 @@ function Home({
     }
   }, []);
   const equipment = dashboard?.equipment;
-  const energy = dashboard?.energy;
   const alarms = dashboard?.alarms;
   const workOrders = dashboard?.work_orders;
-  const locateAlarm = (assetCode: string) => setLocatedAlarm(assetCode);
-  const locatedAlarmLabel = locatedAlarm === "5466537" ? "送风口 5466537" : locatedAlarm === "CHWP-02" ? "冷冻水泵 CHWP-02" : locatedAlarm === "VAV-L2-113" ? "VAV-L2-113" : locatedAlarm === "FAF-B1-08" ? "新风机组 FAF-B1-08" : "";
+  const locateAlarm = (alarm: HomeAlarm) => setLocatedAlarm(alarm);
   return <div className="page home-page">
       <div className="page-head">
-        <div><h2>航站楼运维态势</h2><p>设备、能耗、报警与工单的一体化运营视图</p></div>
+        <div><h2>航站楼运维态势</h2><p>设备、空间、报警与工单的一体化运营视图</p></div>
         <div className="head-tools"><Badge tone={dashboard ? "green" : "gray"}><span className="live-dot" /> {dashboard ? "接口数据已接入" : "数据加载中"}</Badge><button className="outline"><Icon name="clock" />实时 API</button></div>
       </div>
       <div className="metric-grid">
         <MetricCard icon="activity" label="设备运行状态" value={String(equipment?.total ?? "—")} unit="台" tone="blue" sub={<><i className="good-dot" />运行 {equipment?.running ?? "—"} · 故障 <b className="red-text">{equipment?.fault ?? "—"}</b></>} />
-        <MetricCard icon="bolt" label="今日综合能耗" value={String(energy?.today_mwh ?? "—")} unit="MWh" tone="teal" sub={<>空调 {energy?.hvac_mwh ?? "—"} MWh · <b className="green-text">同比 {energy?.yoy_percent ?? "—"}%</b></>} />
         <MetricCard icon="alarm" label="当前报警" value={String(alarms?.total ?? "—")} unit="条" tone="red" sub={<>紧急 <b className="red-text">{alarms?.critical ?? "—"}</b> · 一般 {alarms?.general ?? "—"}</>} />
         <MetricCard icon="work" label="待办工单" value={String(workOrders?.todo ?? "—")} unit="项" tone="amber" sub={<>处理中 {workOrders?.doing ?? "—"} · 今日完成 {workOrders?.done ?? "—"}</>} />
       </div>
-      <div className="home-main-grid">
+      <div className="home-feedback-grid">
         <section className="panel campus-panel">
-          <div className="panel-head"><div><small>空间态势</small><h3>航站楼 B1 · 机电空间</h3></div><div className="seg"><button className="active">B1</button><button disabled title="当前 Demo 仅接入 B1 模型">L1</button><button disabled title="当前 Demo 仅接入 B1 模型">L2</button><button disabled title="当前 Demo 仅接入 B1 模型">L3</button></div></div>
-          <div className="floor-map">
-            <svg viewBox="0 0 760 330" role="img" aria-label="航站楼地下一层机电空间示意">
-              <defs><pattern id="dots" width="18" height="18" patternUnits="userSpaceOnUse"><circle cx="1" cy="1" r=".7" fill="#b7c4ca" /></pattern></defs>
-              <rect width="760" height="330" fill="url(#dots)" />
-              <path className="map-outline" d="M72 55h206l48 40h108l49-40h205v65l-95 25v82l95 26v38H72v-38l96-26v-82l-96-25z" />
-              <path className="map-line" d="M168 145h425M168 227h425M278 55v236M483 55v236M326 95v196M434 95v196" />
-              <rect x="329" y="150" width="102" height="70" rx="5" className="map-room selected-room" />
-              <text x="380" y="178" textAnchor="middle" className="map-title">0B2 空调机房</text>
-              <text x="380" y="198" textAnchor="middle" className="map-sub">43 台设备 · 1 条报警</text>
-              <rect x="91" y="154" width="66" height="62" rx="4" className="map-room" /><text x="124" y="183" textAnchor="middle" className="map-small">配电间</text>
-              <rect x="602" y="154" width="66" height="62" rx="4" className="map-room warning-room" /><text x="635" y="183" textAnchor="middle" className="map-small">水泵房</text>
-              <circle cx="351" cy="236" r={locatedAlarm === "5466537" ? 9 : 5} className={locatedAlarm === "5466537" ? "pin-alarm selected-pin" : "pin-ok"} /><circle cx="410" cy="236" r={locatedAlarm === "VAV-L2-113" ? 9 : 5} className={locatedAlarm === "VAV-L2-113" ? "pin-alarm selected-pin" : "pin-warn"} /><circle cx="636" cy="233" r={locatedAlarm === "CHWP-02" || locatedAlarm === "FAF-B1-08" ? 9 : 5} className={locatedAlarm === "CHWP-02" || locatedAlarm === "FAF-B1-08" ? "pin-alarm selected-pin" : "pin-alarm"} />
-            </svg>
-            <div className="map-legend"><span><i className="pin-ok" />正常</span><span><i className="pin-warn" />关注</span><span><i className="pin-alarm" />报警</span></div>
-            {locatedAlarm && <div className="home-model-location" role="status"><Badge tone="red">模型已定位</Badge><strong>{locatedAlarmLabel}</strong><small>已在首页模型中高亮构件</small></div>}
-            <button className="room-pop" onClick={goGraph}><span><Badge tone="blue">重点空间</Badge><strong>0B2 空调机房</strong><small>AHU-0B2-04 送风温度偏高</small></span><Icon name="arrow" /></button>
-          </div>
+          <div className="panel-head"><div><small>空间态势</small><h3>航站楼 B1 · 三维机电空间</h3></div><div className="seg"><button className="active">B1</button><button disabled title="当前 Demo 仅接入 B1 模型">L1</button><button disabled title="当前 Demo 仅接入 B1 模型">L2</button><button disabled title="当前 Demo 仅接入 B1 模型">L3</button></div></div>
+          <MiniModel selectedGlobalIds={[locatedAlarm.ifcGlobalId]} selectedLabel={locatedAlarm.assetCode} title="IFC 三维模型" className="home-ifc-model" />
         </section>
         <aside className="home-right-stack">
           <section className="panel alarm-panel">
             <div className="panel-head"><div><small>事件中心</small><h3>实时报警</h3></div><button className="text-button" disabled title="Demo 仅展示当前报警摘要">查看全部 15</button></div>
             <div className="alarm-summary"><div><strong>03</strong><span>紧急报警</span></div><div><strong>12</strong><span>一般报警</span></div><div className="ring"><span>78%</span></div></div>
             <div className="alarm-list">
-              <div className={`alarm-row airflow-alarm-row ${locatedAlarm === "5466537" ? "selected" : ""}`}><button className="alarm-select" onClick={() => locateAlarm("5466537")} aria-label="定位送风口5466537风量不足报警"><i className="sev high" /><span><strong>送风口 5466537 风量不足</strong><small>{airflowAlarm.location} · 当前 {airflowAlarm.currentAirflow} / 参考 {airflowAlarm.referenceAirflow} m³/h · {airflowDeviationPercent()}%</small></span><time>10:08</time></button><button className="alarm-diagnose" onClick={startAirflowDemo}>开始诊断<Icon name="arrow" size={12} /></button></div>
-              <div className={`alarm-row ${locatedAlarm === "CHWP-02" ? "selected" : ""}`}><button className="alarm-select" onClick={() => locateAlarm("CHWP-02")} aria-label="定位CHWP-02运行电流异常报警"><i className="sev high" /><span><strong>CHWP-02 运行电流异常</strong><small>冷冻机房 · 超过阈值 12%</small></span><time>09:56</time></button></div>
-              <div className={`alarm-row ${locatedAlarm === "VAV-L2-113" ? "selected" : ""}`}><button className="alarm-select" onClick={() => locateAlarm("VAV-L2-113")} aria-label="定位VAV-L2-113通信中断报警"><i className="sev mid" /><span><strong>VAV-L2-113 通信中断</strong><small>T2 二层 · 离线 32 分钟</small></span><time>09:41</time></button></div>
-              <div className={`alarm-row ${locatedAlarm === "FAF-B1-08" ? "selected" : ""}`}><button className="alarm-select" onClick={() => locateAlarm("FAF-B1-08")} aria-label="定位FAF-B1-08滤网压差预警"><i className="sev mid" /><span><strong>FAF-B1-08 滤网压差预警</strong><small>B1 新风机房 · 维护建议</small></span><time>09:22</time></button></div>
+              {homeAlarms.map(alarm => <div key={alarm.id} className={`alarm-row ${alarm.id === "airflow-low" ? "airflow-alarm-row" : ""} ${locatedAlarm.id === alarm.id ? "selected" : ""}`}><button className="alarm-select" onClick={() => locateAlarm(alarm)} aria-label={`定位${alarm.label}`}><i className={`sev ${alarm.severity}`} /><span><strong>{alarm.label}</strong><small>{alarm.space} · {alarm.detail}</small></span><time>{alarm.time}</time><em>定位</em></button>{alarm.id === "airflow-low" && <button className="alarm-diagnose" onClick={startAirflowDemo}><Icon name="graph" size={14} />开始诊断<Icon name="arrow" size={12} /></button>}</div>)}
             </div>
           </section>
           <section className="panel work-panel">
@@ -287,14 +328,6 @@ function Home({
             <div className="work-body"><div className="work-donut"><div><strong>72</strong><span>今日工单</span></div></div><div className="work-legend"><span><i className="done" /><b>46</b> 已完成</span><span><i className="doing" /><b>9</b> 处理中</span><span><i className="todo" /><b>17</b> 待处理</span></div></div>
           </section>
         </aside>
-      </div>
-      <div className="home-bottom-grid">
-        <section className="panel energy-panel">
-          <div className="panel-head"><div><small>ENERGY TREND</small><h3>分时能耗趋势</h3></div><div className="seg">{["今日", "本周", "本月"].map(x => <button key={x} className={range === x ? "active" : ""} onClick={() => setRange(x)} disabled={x !== "今日"} title={x !== "今日" ? "当前 Demo 仅接入今日能耗数据" : undefined}>{x}</button>)}</div></div>
-          <div className="energy-chart"><div className="axis"><span>24</span><span>16</span><span>8</span><span>0</span></div><div className="bars">{energyBars.map((v, i) => <div key={i}><span style={{
-                height: `${v}%`
-              }} className={i === 9 ? "peak" : ""} /><small>{String(i * 2).padStart(2, "0")}</small></div>)}</div><div className="chart-note"><b>18.6</b><span>MWh · 18:00</span></div></div>
-        </section>
       </div>
     </div>;
 }
@@ -431,6 +464,7 @@ function Drawings({
   const [discipline, setDiscipline] = useState("全部专业");
   const [query, setQuery] = useState("T-BE-B1-M18 空调机房 风管平面");
   const [version, setVersion] = useState("原始交付版");
+  const [previewOpen, setPreviewOpen] = useState(false);
   const [loading, setLoading] = useState(false);
   const [loadError, setLoadError] = useState("");
   const requestSequence = useRef(0);
@@ -493,11 +527,11 @@ function Drawings({
   const selected = records.find(d => d.id === selectedId) || records[0] || null;
   const disciplineTree = useMemo(() => tree.flatMap(item => item.node_type === "space" ? item.children || [] : [item]), [tree]);
   const disciplineCounts = useMemo(() => Object.fromEntries(disciplineTree.map(item => [item.name, item.count])), [disciplineTree]);
-  return <div className="page drawing-page">
-    <div className="page-head compact"><div><h2>图纸查询与模型联动</h2></div><div className="head-tools"><Badge tone="green"><span className="live-dot" />图纸目录 {total} 份 · 当前 {records.length} 份</Badge><button className="primary small" onClick={goGraph}><Icon name="link" />定位到知识图谱</button></div></div>
-    <div className="drawing-layout">
-      <aside className="panel tree-panel">
-        <div className="panel-head"><div><small>空间 / 专业</small><h3>图纸目录</h3></div><button className="icon-button" disabled title="请直接使用下方目录与专业筛选"><Icon name="filter" /></button></div>
+  return <><div className="page drawing-page">
+    <div className="page-head compact"><div><h2>图纸查询与模型联动</h2><p>按空间组织专业图纸，在三维模型中定位并通过语义问答检索</p></div><div className="head-tools"><Badge tone="green"><span className="live-dot" />已收集 {total} 份图纸</Badge><button className="primary small" onClick={goGraph}><Icon name="link" />定位到知识图谱</button></div></div>
+    <div className="feedback-three-column drawings-feedback">
+      <aside className="panel tree-panel feedback-tree">
+        <div className="panel-head"><div><small>空间 / 专业</small><h3>机场空间目录</h3></div><Badge tone="amber">IFC 联动</Badge></div>
         <div className="tree-search"><Icon name="search" size={15} /><span>筛选目录</span></div>
         <div className="tree drawing-tree">
           <button className="open" onClick={() => showDiscipline("全部专业")}><Icon name="chevron" size={14} /><Icon name="building" size={16} />机场图纸主目录 <b>{total}</b></button>
@@ -507,21 +541,22 @@ function Drawings({
         </div>
         <div className="discipline-list"><small>专业筛选</small>{["全部专业", ...disciplineTree.map(item => item.name)].map(x => <button key={x} className={discipline === x ? "active" : ""} onClick={() => showDiscipline(x)}><span>{x}</span><b>{x === "全部专业" ? total : disciplineCounts[x] || 0}</b></button>)}</div>
       </aside>
-      <div className="drawing-center">
-        <div className="nl-search panel"><span className="ai-square"><Icon name="spark" /></span><input value={query} onChange={e => setQuery(e.target.value)} onKeyDown={event => event.key === "Enter" && loadDrawings(query)} aria-label="自然语言查询" /><button className="primary" onClick={() => loadDrawings(query)} disabled={loading}><Icon name="search" />{loading ? "检索中" : "智能检索"}</button><div className="query-hint">来自文件目录：<Badge tone="amber">{discipline === "全部专业" ? "全部专业" : discipline}</Badge><Badge tone="blue">{records.length} 个匹配</Badge><Badge tone="gray">PDF 原文件</Badge>{loadError && <Badge tone="red">{loadError}</Badge>}</div></div>
-        <DrawingPreview selected={selected} version={version} setVersion={setVersion} />
-      </div>
-      <aside className="panel result-panel">
-        <div className="panel-head"><div><small>SEARCH RESULTS</small><h3>相关图纸 <em>{visibleRecords.length}</em></h3></div><button className="icon-button" disabled title="暂无更多列表操作"><Icon name="more" /></button></div>
+      <main className="panel feedback-center drawing-center-feedback">
+        <MiniModel selectedGlobalIds={selected?.ifc_room ? ["3nUg2jPlz76PUi_3jscap4"] : []} selectedLabel={selected?.ifc_room ? "T-BE-B1-M18 空调机房" : "航站楼 B1"} title="IFC 三维模型" className="drawing-ifc-model" />
+        <SemanticQuery value={query} onChange={setQuery} onSubmit={loadDrawings} context="T-BE-B1-M18 空调机房" count={records.length} loading={loading} error={loadError} />
+      </main>
+      <aside className="panel result-panel feedback-results">
+        <div className="panel-head"><div><small>选中空间对应图纸</small><h3>{discipline === "全部专业" ? "T-BE-B1-M18 空调机房" : `${discipline}专业`}</h3></div><Badge tone="blue">{visibleRecords.length} 份</Badge></div>
         <div className="result-filter"><span>相关度排序</span><span>当前有效版本</span></div>
         <div className="drawing-results">{visibleRecords.map((d, i) => <button key={d.id} className={selectedId === d.id ? "selected" : ""} onClick={() => {
             setSelectedId(d.id);
             setVersion("原始交付版");
           }}><span className="doc-index">{String(i + 1).padStart(2, "0")}</span><span><strong>{d.title}</strong><small>{d.id}</small><span><Badge tone={d.ifc_room ? "amber" : "blue"}>{d.discipline}</Badge><em>{d.version}</em></span></span>{selectedId === d.id && <i />}</button>)}</div>
         <div className="version-note"><Icon name="clock" /><span><strong>版本字段待补录</strong><small>当前文件夹未提供版本号、来源和发布日期，实施阶段从图档系统同步。</small></span></div>
+        <button className="primary drawing-preview-entry" onClick={() => setPreviewOpen(true)} disabled={!selected}><Icon name="file" />打开选中图纸预览</button>
       </aside>
     </div>
-  </div>;
+  </div>{previewOpen && <section className="drawing-preview-shell" role="dialog" aria-modal="false" aria-label="图纸预览"><header><div><small>DRAWING PREVIEW</small><strong>{selected?.title || "图纸预览"}</strong></div><button onClick={() => setPreviewOpen(false)} aria-label="关闭图纸预览">×</button></header><DrawingPreview selected={selected} version={version} setVersion={setVersion} /><footer><span>PDF 原文 · 当前有效版本</span><button onClick={() => setPreviewOpen(false)}>关闭预览</button></footer></section>}</>;
 }
 const graphNodes = [{
   id: "ahu",
@@ -604,10 +639,14 @@ const graphNodes = [{
 type ModelMeshRecord = { mesh: THREE.Mesh; globalId: string; originalMaterial: THREE.Material | THREE.Material[] };
 function MiniModel({
   selectedGlobalIds,
-  selectedLabel
+  selectedLabel,
+  title = "IFC 模型",
+  className = ""
 }: {
   selectedGlobalIds: string[];
   selectedLabel: string;
+  title?: string;
+  className?: string;
 }) {
   const mountRef = useRef<HTMLDivElement>(null);
   const resetRef = useRef<() => void>(() => undefined);
@@ -812,8 +851,8 @@ function MiniModel({
   }, []);
   const selectionKey = selectedGlobalIds.join("|");
   useEffect(() => applySelectionRef.current(selectedGuidsRef.current), [selectionKey]);
-  return <div className="model-view">
-    <div className="model-title"><span><i className="live-dot" />IFC 模型</span><div>{selectedGlobalIds.length > 0 && <Badge tone={isolatedCount ? "amber" : "gray"}>{isolatedCount ? `已隔离 ${selectedLabel} · ${isolatedCount}个构件` : "正在定位几何"}</Badge>}<Badge tone="green">IFC2X3 · GLB</Badge></div></div>
+  return <div className={`model-view ${className}`}>
+    <div className="model-title"><span><i className="live-dot" />{title}</span><div>{selectedGlobalIds.length > 0 && <Badge tone={isolatedCount ? "amber" : "gray"}>{isolatedCount ? `已隔离 ${selectedLabel} · ${isolatedCount}个构件` : "正在定位几何"}</Badge>}<Badge tone="green">IFC2X3 · GLB</Badge></div></div>
     <div ref={mountRef} className="model-webgl" aria-label="IFC 三维模型查看器" />
     {progress < 100 && !modelError && <div className="model-loading"><span className="spinner" />正在加载 IFC 几何 {progress}%</div>}
     {modelError && <div className="model-loading model-error"><Icon name="warning" />{modelError}</div>}
@@ -879,9 +918,9 @@ function KnowledgeGraph({ demoAlarm, goAssistant }: { demoAlarm: AirflowAlarmCon
   const [modelGroup, setModelGroup] = useState<{ name: string; label: string; globalIds?: string[]; systemName?: string } | null>(null);
   const [nodeOverrides, setNodeOverrides] = useState<Record<string, { x: number; y: number }>>({});
   const [tab, setTab] = useState<"props" | "points" | "relations">("props");
+  const [detailsOpen, setDetailsOpen] = useState(false);
   const [showLedger, setShowLedger] = useState(false);
   const [showRoomModal, setShowRoomModal] = useState(false);
-  const [filtersOpen, setFiltersOpen] = useState(true);
   const [graphMode, setGraphMode] = useState<"system" | "semantic">("system");
   const [graphDepth, setGraphDepth] = useState(1);
   const [graphZoom, setGraphZoom] = useState(1);
@@ -971,10 +1010,11 @@ function KnowledgeGraph({ demoAlarm, goAssistant }: { demoAlarm: AirflowAlarmCon
     ? [...new Set([...(modelGroup.globalIds || []), ...systemAssetGlobalIds(assets, modelGroup.systemName)])]
     : modelGroup?.globalIds || (selectedGlobalId ? [selectedGlobalId] : []);
   const selectedModelLabel = modelGroup?.label || selectedNode.label;
+  const entityFilters: Array<[string, number, string]> = [["设备", graphData?.nodes.filter(node => node.kind === "设备" || node.kind === "设备类型").length || 0, "#2d6f93"], ["系统", graphData?.nodes.filter(node => node.kind === "系统").length || 0, "#5d88a0"], ["空间", graphData?.nodes.filter(node => node.kind === "空间" || node.kind === "房间").length || 0, "#c38a2e"], ["服务区域", graphData?.meta.service_area_count || 0, "#c38a2e"], ["点位", graphData?.meta.point_count || 0, "#2d8061"], ["报警", graphData?.nodes.filter(node => node.kind === "报警").length || 0, "#b94b45"]];
   return <div className="page graph-page">
-    <div className="page-head compact"><div><h2>机电系统 AI 运维知识图谱</h2></div><div className="head-tools"><Badge tone="green"><span className="live-dot" />IFC {graphData?.meta.asset_count?.toLocaleString() || "—"} 设备已解析</Badge><button className="outline" onClick={() => setShowLedger(true)}><Icon name="file" />数据台账</button><button className="outline" onClick={() => setFiltersOpen(open => !open)}><Icon name="filter" />{filtersOpen ? "收起筛选" : "展开筛选"}</button><button className="primary small" onClick={() => void graphPanelRef.current?.requestFullscreen()}><Icon name="expand" />沉浸分析</button></div></div>
-    <div className={`kg-layout ${filtersOpen ? "" : "filters-collapsed"}`}>
-      <aside className={`panel kg-sidebar ${filtersOpen ? "" : "collapsed"}`}>
+    <div className="page-head compact"><div><h2>机电系统 AI 运维知识图谱</h2><p>建筑系统拓扑、IFC 三维构件与语义关系同步联动</p></div><div className="head-tools"><Badge tone="green"><span className="live-dot" />IFC {graphData?.meta.asset_count?.toLocaleString() || "—"} 设备已解析</Badge><Badge tone="amber">补充关系为 Demo</Badge><button className="outline" onClick={() => setShowLedger(true)}><Icon name="file" />数据台账</button><button className="primary small" onClick={() => void graphPanelRef.current?.requestFullscreen()}><Icon name="expand" />沉浸分析</button></div></div>
+    <div className="kg-layout graph-feedback">
+      <aside className="panel kg-sidebar feedback-tree">
         <div className="kg-search"><Icon name="search" /><input value={assetQuery} placeholder="搜索设备编码或名称" onChange={event => setAssetQuery(event.target.value)} onKeyDown={event => event.key === "Enter" && assetQuery.trim() && loadGraph(assetQuery)} aria-label="设备清单搜索" /></div>
         <div className="asset-tree"><div className="asset-tree-head"><small>设备清单</small><Badge tone="blue">{filteredAssets.length} 台</Badge></div>{assetGroups.map(group => <div className="asset-group" key={group.name}><button className={`asset-group-button ${modelGroup?.name === group.name ? "selected" : ""}`} onClick={() => isolateAssetGroup(group.name, group.items)} aria-label={`隔离${group.name}分组的${group.items.length}台设备`}><Icon name="chevron" size={13} /><span>{group.name}</span><b>{group.items.length}</b></button>{(openAssetGroups.has(group.name) || Boolean(assetQuery.trim())) && <div className="asset-items">{group.items.map(asset => <button key={asset.asset_code} className={selected === `asset:${asset.asset_code}` && !modelGroup ? "selected" : ""} onClick={() => loadGraph(asset.asset_code)}><i /><span><strong>{asset.asset_code}</strong><small>{asset.name || asset.ifc_class}</small></span></button>)}</div>}</div>)}</div>
         <div className="kg-section"><small>图谱范围</small><label>当前邻域 <b>{graphDepth} 跳</b></label><input aria-label="图谱邻域层级" type="range" min="1" max="3" step="1" value={graphDepth} onChange={event => {
@@ -982,7 +1022,7 @@ function KnowledgeGraph({ demoAlarm, goAssistant }: { demoAlarm: AirflowAlarmCon
           setGraphDepth(next);
           loadGraph(currentFocus, next);
         }} /><div className="range-label"><span>1 跳</span><span>2 跳</span><span>3 跳</span></div></div>
-        <div className="kg-section"><small>实体类型</small>{[["设备", graphData?.nodes.filter(node => node.kind === "设备" || node.kind === "设备类型").length || 0, "#2d6f93"], ["系统", graphData?.nodes.filter(node => node.kind === "系统").length || 0, "#5d88a0"], ["空间", graphData?.nodes.filter(node => node.kind === "空间" || node.kind === "房间").length || 0, "#c38a2e"], ["服务区域", graphData?.meta.service_area_count || 0, "#c38a2e"], ["点位", graphData?.meta.point_count || 0, "#2d8061"], ["报警", graphData?.nodes.filter(node => node.kind === "报警").length || 0, "#b94b45"]].map(x => <label className="check-row" key={String(x[0])}><input type="checkbox" checked={visibleKinds[String(x[0])] !== false} onChange={event => setVisibleKinds(current => ({ ...current, [String(x[0])]: event.target.checked }))} /><i style={{
+        <div className="kg-section entity-filter-sidebar"><small>实体类型</small>{entityFilters.map(x => <label className="check-row" key={String(x[0])}><input type="checkbox" checked={visibleKinds[String(x[0])] !== false} onChange={event => setVisibleKinds(current => ({ ...current, [String(x[0])]: event.target.checked }))} /><i style={{
               background: String(x[2])
             }} /><span>{x[0]}</span><b>{x[1]}</b></label>)}</div>
         <div className="kg-section"><small>关系类型</small><div className="relation-key"><span><i className="line solid" />上下游</span><span><i className="line blue" />连接</span><span><i className="line amber" />服务区域</span><span><i className="line dash" />方向待确认</span></div></div>
@@ -1000,9 +1040,10 @@ function KnowledgeGraph({ demoAlarm, goAssistant }: { demoAlarm: AirflowAlarmCon
           </div>
         </section>}
         <div className="kg-split">
-          <MiniModel selectedGlobalIds={selectedModelIds} selectedLabel={selectedModelLabel} />
+          <div className="kg-model-stack"><MiniModel selectedGlobalIds={selectedModelIds} selectedLabel={selectedModelLabel} title="IFC 三维模型" /><SemanticQuery value={assetQuery} onChange={setAssetQuery} onSubmit={value => loadGraph(value)} context={`${selectedNode.label} · ${selectedNode.kind}`} count={visibleGraphNodes.length} /></div>
           <div className="graph-view">
             <div className="model-title"><span><i className="live-dot" />关系网络</span><div><button className={graphMode === "system" ? "mini-active" : ""} onClick={() => setGraphMode("system")}>系统拓扑</button><button className={graphMode === "semantic" ? "mini-active" : ""} onClick={() => setGraphMode("semantic")}>语义关系</button></div></div>
+            <div className="graph-filterbar"><span><Icon name="filter" size={14} />领域筛选</span>{entityFilters.map(([kind]) => <label key={kind}><input type="checkbox" checked={visibleKinds[kind] !== false} onChange={event => setVisibleKinds(current => ({ ...current, [kind]: event.target.checked }))} />{kind}</label>)}<button onClick={() => setShowRoomModal(true)}>关系说明</button></div>
             <svg ref={graphSvgRef} viewBox="0 0 760 520" aria-label="机电系统知识图谱" onPointerMove={moveNodeDrag} onPointerUp={endNodeDrag} onPointerCancel={endNodeDrag}>
               <defs><pattern id="kgdots" width="18" height="18" patternUnits="userSpaceOnUse"><circle cx="1" cy="1" r=".6" fill="#cbd6da" /></pattern><marker id="kgarr" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0 0l8 4-8 4z" fill="#2d6f93" /></marker><marker id="kgarrAmber" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0 0l8 4-8 4z" fill="#c38a2e" /></marker></defs>
               <rect width="760" height="470" fill="url(#kgdots)" />
@@ -1023,9 +1064,10 @@ function KnowledgeGraph({ demoAlarm, goAssistant }: { demoAlarm: AirflowAlarmCon
               </g>)}</g>
             </svg>
             <div className="graph-controls"><button onClick={() => setGraphZoom(value => Math.min(1.5, value + .1))}>＋</button><button onClick={() => setGraphZoom(value => Math.max(.7, value - .1))}>−</button><button onClick={() => { setGraphZoom(1); setNodeOverrides({}); }} title="重置拓扑布局">◎</button><span>拖动节点可调整布局 · {visibleGraphNodes.length} 节点 / {visibleEdges.length} 关系</span></div>
+            <div className="selected-node-strip"><span className={`detail-kind ${selectedNode.tone}`}><Icon name={selectedNode.kind === "房间" || selectedNode.kind === "空间" || selectedNode.kind === "服务区域" ? "building" : "activity"} /></span><span><small>当前选中 · 模型已联动隔离</small><strong>{selectedNode.label}</strong></span><Badge tone="blue">{selectedNode.kind}</Badge><button onClick={() => setDetailsOpen(open => !open)}>{detailsOpen ? "收起对象详情" : "查看对象详情"} <Icon name="chevron" size={13} /></button></div>
           </div>
         </div>
-        <section className="kg-details">
+        {detailsOpen && <section className="kg-details">
           <div className="detail-head"><div><span className={`detail-kind ${selectedNode.tone}`}><Icon name={selectedNode.kind === "房间" || selectedNode.kind === "空间" || selectedNode.kind === "服务区域" ? "building" : "activity"} /></span><div><small>{selectedNode.kind}</small><h3>{selectedNode.label}</h3></div></div><div className="detail-tabs"><button className={tab === "props" ? "active" : ""} onClick={() => setTab("props")}>对象属性</button><button className={tab === "points" ? "active" : ""} onClick={() => setTab("points")}>监测点位 <b>{pointNodes.length}</b></button><button className={tab === "relations" ? "active" : ""} onClick={() => setTab("relations")}>关联关系 <b>{incidentEdges.length}</b></button></div><button className="ledger-link" onClick={() => setShowLedger(true)}>IFC + 台账 + 演示点表 <Icon name="chevron" size={13} /></button></div>
           {tab === "props" && <div className="property-grid">{propertyEntries.length ? propertyEntries.map(([key, value]) => <span key={key}><small>{key}</small><strong>{String(value || "—")}</strong></span>) : <span><small>实体标识</small><strong>{selectedNode.id}</strong></span>}</div>}
           {tab === "points" && <div className="point-table"><div className="table-head"><span>点位</span><span>类型 / 地址</span><span>单位</span><span>来源</span></div>{pointNodes.map(node => <div key={node.id}><span><code>{node.label.replace("AHU-0B2-04.", "")}</code></span><span>{String(node.properties?.io_type || "—")} · {String(node.properties?.address || "—")}</span><strong>{String(node.properties?.unit || "—")}</strong><span><Badge tone="amber">{String(node.properties?.source || "Demo")}</Badge></span></div>)}</div>}
@@ -1035,7 +1077,7 @@ function KnowledgeGraph({ demoAlarm, goAssistant }: { demoAlarm: AirflowAlarmCon
             const service = edge.type === "SERVES" || edge.type === "SUPPLIES";
             return <div key={`${edge.source}-${edge.type}-${edge.target}`} className={service ? "service-card" : ""}><Badge tone={service ? "amber" : "blue"}>{edge.type}</Badge><strong>{outgoing ? selectedNode.label : other?.label} → {outgoing ? other?.label : selectedNode.label}</strong><span>{edge.source_kind?.includes("demo") ? "Demo 补充关系，待实施校核" : "来自 IFC / 图谱实际关系数据"}</span>{service && <button onClick={() => setShowRoomModal(true)}>查看房间与服务区域关系 <Icon name="arrow" size={13} /></button>}</div>;
           })}</div>}
-        </section>
+        </section>}
       </main>
     </div>
     {showLedger && <DataLedgerModal onClose={() => setShowLedger(false)} />}
@@ -1085,6 +1127,7 @@ function Assistant({ goGraph, demoAlarm }: { goGraph: () => void; demoAlarm: Air
   const [response, setResponse] = useState<AssistantResponse>(emptyAssistantResponse);
   const [selectedEvidence, setSelectedEvidence] = useState(0);
   const [previewDocument, setPreviewDocument] = useState<AssistantEvidence | null>(null);
+  const [sideTab, setSideTab] = useState<"asset" | "evidence">(demoAlarm ? "evidence" : "asset");
   const historyInitialized = useRef(false);
   const alarmRequestStarted = useRef(false);
   const selectHistory = (item: AssistantHistoryItem) => {
@@ -1120,6 +1163,7 @@ function Assistant({ goGraph, demoAlarm }: { goGraph: () => void; demoAlarm: Air
       setHistory(current => [nextResponse, ...current.filter(item => item.id !== nextResponse.id)]);
       setHistoryQuery("");
       setSelectedEvidence(0);
+      setSideTab("evidence");
     } catch (reason) {
       setResponse({
         answer: reason instanceof Error ? reason.message : "助手服务暂不可用，请稍后重试。",
@@ -1189,7 +1233,7 @@ function Assistant({ goGraph, demoAlarm }: { goGraph: () => void; demoAlarm: Air
   const providerLabel = response.provider === "open-webui" ? "Open WebUI 实时生成" : response.provider === "error" ? "服务异常" : response.provider === "loading" ? "等待提问" : "本地检索 · 模板回答";
   const confidence = !asked || loading ? 0 : response.provider === "open-webui" ? 92 : response.provider === "error" ? 0 : 76;
   return <><div className="page assistant-page">
-    <div className="page-head compact"><div><h2>运维智能助手</h2></div><div className="head-tools"><Badge tone="green"><span className="live-dot" />资料检索已接入</Badge><Badge tone="green">4 份 PDF · 67 页</Badge></div></div>
+    <div className="page-head compact"><div><h2>运维智能助手</h2><p>以空间与设备为上下文，联合三维模型、知识图谱和手册知识库辅助处置</p></div><div className="head-tools"><Badge tone="green"><span className="live-dot" />资料检索已接入</Badge><Badge tone="green">4 份 PDF · 67 页</Badge></div></div>
     <div className="assistant-layout">
       <aside className="panel conversation-list">
         <button className="primary new-chat" onClick={() => { setActiveHistoryId(null); setAsked(false); setQuestion(""); setInput(""); setResponse(emptyAssistantResponse); setPreviewDocument(null); setNotice("已新建会话，请输入问题"); }}><span>＋</span>新建会话</button>
@@ -1203,6 +1247,8 @@ function Assistant({ goGraph, demoAlarm }: { goGraph: () => void; demoAlarm: Air
         </div>
         <div className="assistant-cap"><Icon name="spark" /><span><strong>仅基于本地资料回答</strong><small>设备手册、技术样本、培训卡和消防图纸均显示可追溯来源。</small></span></div>
       </aside>
+      <div className="assistant-center-stack">
+      <MiniModel selectedGlobalIds={[demoAlarm?.ifcGlobalId || "3nUg2jPlz76PUi_3jscap4"]} selectedLabel={demoAlarm?.assetCode || "AHU-0B2-04"} title="IFC 三维模型" className="assistant-ifc-model" />
       <main className="panel chat-panel">
         <div className="chat-head"><div><span className="ai-orb"><Icon name="spark" /></span><div><h3>机场运维 Copilot</h3><small><i className="live-dot" />检索范围：机场机电运维资料库</small></div></div><button className="outline" disabled title="当前 Demo 使用固定本地知识库"><Icon name="more" />固定知识库</button></div>
         {demoAlarm && <div className="assistant-flow-context"><span><b>03</b>图谱上下文已带入</span>{airflowContextChips.map(chip => <Badge key={chip} tone={chip.startsWith("路径") ? "amber" : "blue"}>{chip}</Badge>)}</div>}
@@ -1225,16 +1271,17 @@ function Assistant({ goGraph, demoAlarm }: { goGraph: () => void; demoAlarm: Air
             void send();
           }
         }} placeholder="询问设备故障、操作步骤、维护标准或历史经验…" /><div><span><button disabled title="Demo 暂不支持上传附件">＋</button><button onClick={() => setNotice(`当前会话已关联设备 ${demoAlarm?.assetCode || "AHU-0B2-04"}`)}><Icon name="link" size={16} />关联 {demoAlarm?.assetCode || "AHU-0B2-04"}</button></span><span><small>Enter 发送 · Shift+Enter 换行</small><button className="send" onClick={() => void send()} aria-label="发送" disabled={loading || !input.trim()}><Icon name="send" /></button></span></div></div>
-      </main>
-      <aside className="panel evidence-panel">
-        <div className="panel-head"><div><small>EVIDENCE</small><h3>回答依据</h3></div><Badge tone="green">本地资料</Badge></div>
+      </main></div>
+      <aside className="panel evidence-panel asset-brief">
+        <div className="panel-head"><div><small>{sideTab === "asset" ? "选中设备" : "EVIDENCE"}</small><h3>{sideTab === "asset" ? "设备结构化信息" : "回答依据"}</h3></div><div className="side-tab-switch"><button className={sideTab === "asset" ? "active" : ""} onClick={() => setSideTab("asset")}>设备</button><button className={sideTab === "evidence" ? "active" : ""} onClick={() => setSideTab("evidence")}>依据</button></div></div>
+        {sideTab === "asset" ? <div className="asset-brief-content"><div className="asset-title"><span className="detail-kind primary"><Icon name="activity" /></span><span><strong>AHU-0B2-04</strong><small>组合式空气处理机组</small></span><Badge tone="green">运行</Badge></div><div className="asset-facts">{[["名称", "AHU-0B2-04"], ["类型", "组合式空气处理机组"], ["运行状态", "运行 · 送风温度偏高"], ["所在空间", "T-BE-B1-M18 空调机房"], ["投运年份", "2025 · Demo"]].map(row => <span key={row[0]}><small>{row[0]}</small><strong>{row[1]}</strong></span>)}</div><section className="brief-section"><div><strong>设备资料</strong><Badge tone="blue">2</Badge></div>{["E-01-1 空调机组设备手册.pdf", "麦克维尔 MDM 系列组合式空气处理机组资料.pdf"].map(document => <button key={document} onClick={() => setPreviewDocument({ document, page: 1, content: "设备手册原文预览；内容来自机场机电运维资料库。" })}><Icon name="file" size={15} /><span>{document}</span><Icon name="expand" size={13} /></button>)}</section><section className="brief-section"><div><strong>历史维修记录</strong><Badge tone="amber">Demo</Badge></div><ol><li><time>2026-08-18</time><span><strong>更换中效过滤器</strong><small>工单 WO-260818-027 · 已完成</small></span></li><li><time>2026-06-03</time><span><strong>送风机皮带张紧</strong><small>工单 WO-260603-011 · 已完成</small></span></li></ol></section></div> : <>
         <div className="confidence"><div><strong>{confidence}%</strong><span>{response.provider === "open-webui" ? "回答置信度" : "检索匹配度"}</span></div><span><i style={{ width: `${confidence}%` }} /></span><small>{response.evidence.length} 项资料证据</small></div>
         <div className="evidence-list">
           {loading && <div className="evidence-empty">正在检索资料…</div>}
           {!loading && response.evidence.map((evidence, index) => <button key={`${evidence.document}-${evidence.page}-${index}`} className={selectedEvidence === index ? "active" : ""} onClick={() => { setSelectedEvidence(index); setPreviewDocument(evidence); }} title="打开原文预览"><span className={`source-icon ${index % 4 === 1 ? "code" : index % 4 === 2 ? "wo" : index % 4 === 3 ? "kg" : "pdf"}`}>PDF</span><span><small>第 {evidence.page || 1} 页 · 资料来源</small><strong>{evidence.document?.replace(/\.pdf$/i, "") || "未命名资料"}</strong><p>{evidence.content?.slice(0, 54) || "点击预览原文"}</p><span className="preview-entry">预览文档 <Icon name="arrow" size={12} /></span></span><em>{String(index + 1).padStart(2, "0")}</em></button>)}
           {!loading && response.evidence.length === 0 && <div className="evidence-empty">本次回答未检索到可引用资料</div>}
         </div>
-        {activeEvidence && <div className="evidence-preview"><div><Icon name="file" /><span><strong>{activeEvidence.document}</strong><small>已定位第 {activeEvidence.page || 1} 页原文片段</small></span></div><p>{activeEvidence.content}</p><button onClick={() => setPreviewDocument(activeEvidence)}>打开文档预览 <Icon name="arrow" size={13} /></button></div>}
+        {activeEvidence && <div className="evidence-preview"><div><Icon name="file" /><span><strong>{activeEvidence.document}</strong><small>已定位第 {activeEvidence.page || 1} 页原文片段</small></span></div><p>{activeEvidence.content}</p><button onClick={() => setPreviewDocument(activeEvidence)}>打开文档预览 <Icon name="arrow" size={13} /></button></div>}</>}
       </aside>
     </div>
   </div>{previewDocument?.document && <section className="document-preview-shell" role="dialog" aria-modal="false" aria-label={`${previewDocument.document} 文档预览`}><header><div><small>DOCUMENT PREVIEW · 第 {previewDocument.page || 1} 页</small><strong>{previewDocument.document}</strong></div><button onClick={() => setPreviewDocument(null)} aria-label="关闭文档预览" title="关闭">×</button></header><iframe src={documentPreviewUrl(previewDocument.document, previewDocument.page)} title={`${previewDocument.document} 第 ${previewDocument.page || 1} 页`} /><footer><span>PDF 原文 · 可滚动、缩放与下载</span><button onClick={() => setPreviewDocument(null)}>关闭预览</button></footer></section>}</>;
@@ -1257,7 +1304,12 @@ function EnhancementStyles() {
     .evidence-empty{padding:20px 12px;text-align:center;border:1px dashed var(--line);color:var(--muted);font-size:10px}.preview-entry{display:inline-flex!important;align-items:center;gap:4px!important;margin-top:6px!important;color:var(--blue)!important;font-size:9px!important;font-weight:600}.evidence-preview button:not(:disabled){color:var(--blue);font-weight:600}.document-preview-shell{position:fixed;z-index:1200;top:72px;right:18px;bottom:18px;width:min(720px,50vw);min-width:520px;display:flex;flex-direction:column;background:#fff;border:1px solid #aebdc4;border-radius:5px;box-shadow:0 26px 80px rgba(9,25,34,.34);overflow:hidden}.document-preview-shell header{min-height:64px;padding:12px 14px 10px 18px;display:flex;align-items:center;justify-content:space-between;gap:18px;border-bottom:1px solid var(--line);background:linear-gradient(100deg,#fff,#f1f6f7)}.document-preview-shell header div{min-width:0}.document-preview-shell header small,.document-preview-shell header strong{display:block}.document-preview-shell header small{font:600 9px 'IBM Plex Mono';letter-spacing:.08em;color:var(--blue);margin-bottom:4px}.document-preview-shell header strong{font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.document-preview-shell header button{width:34px;height:34px;flex:0 0 34px;border:1px solid var(--line);background:#fff;font-size:23px;line-height:1;color:#657780}.document-preview-shell iframe{width:100%;flex:1;border:0;background:#e8edef}.document-preview-shell footer{height:46px;flex:0 0 46px;padding:0 14px 0 18px;display:flex;align-items:center;justify-content:space-between;border-top:1px solid var(--line);background:#fff}.document-preview-shell footer span{font-size:9px;color:var(--muted)}.document-preview-shell footer button{height:29px;padding:0 12px;background:var(--deep);color:#fff;border-radius:3px;font-size:10px}
     .home-main-grid{grid-template-columns:minmax(0,1.72fr) minmax(350px,.68fr);min-height:calc(100vh - 300px)}.home-main-grid .campus-panel{height:auto;min-height:620px;display:flex;flex-direction:column}.home-main-grid .floor-map{height:auto;flex:1;min-height:500px}.home-right-stack{display:flex;flex-direction:column;gap:12px;min-width:0}.home-right-stack .alarm-panel{height:auto;flex:1;min-height:0}.home-right-stack .work-panel{height:205px;flex:0 0 205px}.home-right-stack .work-body{height:135px;gap:22px}.home-right-stack .work-donut{width:88px;height:88px}.home-right-stack .work-donut:after{width:60px;height:60px}.home-bottom-grid{grid-template-columns:1fr}.home-page .alarm-list{overflow:auto}.home-page .alarm-row{display:grid;grid-template-columns:minmax(0,1fr) auto;border-bottom:1px solid #eef2f3}.home-page .alarm-select{width:100%;display:flex;align-items:flex-start;text-align:left;padding:11px 4px;gap:9px}.home-page .alarm-select>span{flex:1;min-width:0}.home-page .alarm-select strong,.home-page .alarm-select small{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.home-page .alarm-select time{margin-left:auto;white-space:nowrap}.home-page .alarm-select:disabled{opacity:1;color:inherit}.alarm-diagnose{margin:7px 8px 7px 0;padding:0 9px;display:flex;align-items:center;gap:5px;background:var(--deep);color:#fff;border-radius:3px;font-size:10px;font-weight:600;white-space:nowrap}.alarm-diagnose:hover{background:#103d55}.home-right-stack .alarm-list button{border-bottom:0}.home-right-stack .alarm-list .alarm-row:hover{background:#fafcfc}
     .home-page .alarm-row.selected{background:#fff6e5;box-shadow:inset 3px 0 var(--amber)}.home-page .alarm-row.selected .alarm-select strong{color:var(--deep)}.selected-pin{stroke:#fff;stroke-width:3;filter:drop-shadow(0 0 5px rgba(185,75,69,.65))}.home-model-location{position:absolute;left:13px;top:14px;display:flex;flex-direction:column;align-items:flex-start;gap:4px;padding:10px 12px;background:rgba(255,255,255,.95);border:1px solid #e4b5b1;box-shadow:0 8px 20px rgba(105,45,40,.12)}.home-model-location strong{font:600 11px 'IBM Plex Mono';color:var(--ink)}.home-model-location small{font-size:9px;color:var(--muted)}
-    @media(max-width:1050px){.room-facts{grid-template-columns:repeat(2,1fr)}.room-facts .wide{grid-column:span 2}.service-map{grid-template-columns:150px 80px 1fr}.service-zones{grid-template-columns:1fr}.modal-backdrop{padding:15px}.graph-relation-cards{grid-template-columns:1fr}.document-preview-shell{width:min(760px,70vw)}.home-main-grid{grid-template-columns:1fr;min-height:0}.home-main-grid .campus-panel{min-height:500px}.home-main-grid .floor-map{min-height:390px}.home-right-stack .alarm-panel{min-height:360px}}
+    .home-page .metric-grid{grid-template-columns:repeat(3,1fr)}.home-feedback-grid{display:grid;grid-template-columns:minmax(0,1.72fr) minmax(360px,.68fr);gap:12px;height:calc(100vh - 272px);min-height:610px}.home-feedback-grid .campus-panel{height:auto;min-height:0;display:flex;flex-direction:column;overflow:hidden}.home-ifc-model{flex:1;min-height:0;border:0;border-top:1px solid var(--line);border-radius:0}.home-feedback-grid .home-right-stack{height:100%}.home-feedback-grid .alarm-panel{flex:1;min-height:0;display:flex;flex-direction:column}.home-feedback-grid .alarm-list{flex:1;min-height:0}.home-feedback-grid .work-panel{height:205px;flex:0 0 205px}.alarm-select em{font:500 9px 'IBM Plex Mono';font-style:normal;color:var(--amber);margin-left:5px}.home-ifc-model .model-loading{background:rgba(240,244,245,.82)}
+    .feedback-three-column{display:grid;grid-template-columns:236px minmax(520px,1fr) 330px;gap:12px;height:calc(100vh - 154px);min-height:650px}.feedback-tree,.feedback-results{overflow:hidden}.drawing-center-feedback{min-width:0;display:flex;flex-direction:column;overflow:hidden}.drawing-ifc-model{flex:1;min-height:0;border:0;border-radius:0}.semantic-query{flex:0 0 auto;border-top:1px solid var(--line);padding:12px 14px;background:#fff}.semantic-head{display:flex;align-items:center;gap:9px}.semantic-head>div{flex:1}.semantic-head small,.semantic-head strong{display:block}.semantic-head small{font:500 9px 'IBM Plex Mono';letter-spacing:.08em;color:var(--muted)}.semantic-head strong{font-size:11px;margin-top:2px}.semantic-input{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px;margin-top:10px}.semantic-input input{height:38px;border:1px solid #afc0c8;padding:0 11px;outline:0;font-size:11px}.semantic-input input:focus{border-color:var(--blue);box-shadow:0 0 0 3px rgba(45,111,147,.1)}.semantic-input .primary{height:38px}.semantic-samples{display:flex;align-items:center;gap:6px;margin-top:8px;overflow:hidden}.semantic-samples button{white-space:nowrap;background:#eef4f6;color:#477083;padding:5px 7px;font-size:8px}.feedback-results{display:flex;flex-direction:column}.feedback-results .drawing-results{flex:1;min-height:0;overflow:auto}.drawing-preview-entry{height:38px;margin:0 12px 12px;width:calc(100% - 24px)}.drawing-preview-shell{position:fixed;z-index:1200;top:72px;right:18px;bottom:18px;width:min(960px,64vw);min-width:640px;display:flex;flex-direction:column;background:#fff;border:1px solid #aebdc4;border-radius:5px;box-shadow:0 26px 80px rgba(9,25,34,.34);overflow:hidden}.drawing-preview-shell>header{min-height:64px;padding:12px 14px 10px 18px;display:flex;align-items:center;justify-content:space-between;gap:18px;border-bottom:1px solid var(--line);background:linear-gradient(100deg,#fff,#f1f6f7)}.drawing-preview-shell>header small,.drawing-preview-shell>header strong{display:block}.drawing-preview-shell>header small{font:600 9px 'IBM Plex Mono';letter-spacing:.08em;color:var(--blue)}.drawing-preview-shell>header strong{font-size:13px;margin-top:4px}.drawing-preview-shell>header button{width:34px;height:34px;border:1px solid var(--line);background:#fff;font-size:23px}.drawing-preview-shell>.drawing-canvas{flex:1;min-height:0;border:0;border-radius:0}.drawing-preview-shell>footer{height:46px;flex:0 0 46px;padding:0 14px 0 18px;display:flex;align-items:center;justify-content:space-between;border-top:1px solid var(--line)}.drawing-preview-shell>footer span{font-size:9px;color:var(--muted)}.drawing-preview-shell>footer button{height:29px;padding:0 12px;background:var(--deep);color:#fff;border-radius:3px;font-size:10px}
+    .graph-feedback .entity-filter-sidebar{display:none}.kg-model-stack{min-width:0;min-height:0;display:flex;flex-direction:column;border-right:1px solid var(--line)}.kg-model-stack>.model-view{flex:1;min-height:0;border-right:0}.kg-model-stack>.semantic-query{flex:0 0 150px}.graph-view{display:flex;flex-direction:column}.graph-filterbar{height:44px;flex:0 0 44px;display:flex;align-items:center;gap:10px;padding:0 12px;border-bottom:1px solid var(--line);background:#fff;font-size:9px}.graph-filterbar>span{display:flex;align-items:center;gap:5px;color:#5b6b73;font-weight:600}.graph-filterbar label{display:flex;align-items:center;gap:4px;white-space:nowrap}.graph-filterbar input{accent-color:var(--blue)}.graph-filterbar button{margin-left:auto;color:#8f661e;background:#fff5df;padding:6px 8px}.graph-view>svg{flex:1;min-height:0;height:auto}.graph-view>.graph-controls{bottom:67px}.selected-node-strip{height:58px;flex:0 0 58px;display:flex;align-items:center;gap:9px;padding:0 12px;border-top:1px solid var(--line);background:#fff}.selected-node-strip>span:nth-child(2){flex:1;min-width:0}.selected-node-strip small,.selected-node-strip strong{display:block}.selected-node-strip small{font-size:8px;color:var(--muted)}.selected-node-strip strong{font:600 10px 'IBM Plex Mono';margin-top:2px}.selected-node-strip>button{display:flex;align-items:center;gap:5px;color:var(--blue);font-size:9px}.graph-feedback .kg-details{position:absolute;z-index:8;left:225px;right:0;bottom:0;height:210px;background:#fff;box-shadow:0 -12px 28px rgba(27,49,60,.12)}
+    .assistant-center-stack{min-width:0;min-height:0;display:grid;grid-template-rows:minmax(260px,44%) minmax(330px,56%);gap:12px}.assistant-ifc-model{min-height:0;border:1px solid var(--line);border-radius:4px}.assistant-center-stack .chat-panel{min-height:0}.side-tab-switch{display:flex;background:#f0f4f5;padding:2px}.side-tab-switch button{padding:5px 8px;font-size:9px;color:var(--muted)}.side-tab-switch button.active{background:#fff;color:var(--blue);box-shadow:0 1px 4px rgba(20,48,61,.12)}.asset-brief-content{padding:0 2px}.asset-title{display:flex;align-items:center;gap:9px;padding:14px 2px;border-bottom:1px solid var(--line)}.asset-title>span:nth-child(2){flex:1}.asset-title strong,.asset-title small{display:block}.asset-title strong{font:600 12px 'IBM Plex Mono'}.asset-title small{font-size:9px;color:var(--muted);margin-top:3px}.asset-facts{padding:6px 0}.asset-facts>span{display:grid;grid-template-columns:90px 1fr;gap:8px;padding:8px 4px;border-bottom:1px solid #edf1f2}.asset-facts small{font-size:9px;color:var(--muted)}.asset-facts strong{font-size:10px}.brief-section{margin-top:12px;border-top:1px solid var(--line);padding-top:12px}.brief-section>div{display:flex;align-items:center;justify-content:space-between;margin-bottom:7px}.brief-section>div>strong{font-size:10px}.brief-section>button{width:100%;display:flex;align-items:center;gap:7px;text-align:left;padding:8px 5px;border-bottom:1px solid #edf1f2;color:var(--blue);font-size:9px}.brief-section>button span{flex:1;color:var(--ink)}.brief-section ol{list-style:none;margin:0;padding:0}.brief-section li{display:flex;gap:9px;padding:8px 4px;border-bottom:1px solid #edf1f2}.brief-section time{font:8px 'IBM Plex Mono';color:var(--muted)}.brief-section li strong,.brief-section li small{display:block}.brief-section li strong{font-size:9px}.brief-section li small{font-size:8px;color:var(--muted);margin-top:2px}
+    @media(max-width:1350px){.feedback-three-column{grid-template-columns:205px minmax(500px,1fr) 285px}.graph-filterbar{gap:6px}.graph-filterbar label{font-size:8px}.assistant-layout{grid-template-columns:205px minmax(500px,1fr) 285px}}
+    @media(max-width:1050px){.room-facts{grid-template-columns:repeat(2,1fr)}.room-facts .wide{grid-column:span 2}.service-map{grid-template-columns:150px 80px 1fr}.service-zones{grid-template-columns:1fr}.modal-backdrop{padding:15px}.graph-relation-cards{grid-template-columns:1fr}.document-preview-shell,.drawing-preview-shell{width:min(760px,70vw);min-width:520px}.home-feedback-grid{grid-template-columns:1fr;height:auto;min-height:0}.home-feedback-grid .campus-panel{min-height:500px}.home-feedback-grid .home-right-stack{min-height:570px}.feedback-three-column{grid-template-columns:205px minmax(500px,1fr)}.feedback-results{display:none}.assistant-center-stack{grid-template-rows:320px 520px}}
   `}</style>;
 }
 export const AIDemo = () => {
@@ -1268,7 +1320,7 @@ export const AIDemo = () => {
     setPage(nextPage);
   };
   const content = useMemo(() => {
-    if (page === "home") return <Home goGraph={() => navigateNormally("graph")} startAirflowDemo={() => { setDemoAlarm(airflowAlarm); setPage("graph"); }} />;
+    if (page === "home") return <Home startAirflowDemo={() => { setDemoAlarm(airflowAlarm); setPage("graph"); }} />;
     if (page === "drawings") return <Drawings goGraph={() => navigateNormally("graph")} />;
     if (page === "graph") return <KnowledgeGraph key={demoAlarm?.alarmId || "standard-graph"} demoAlarm={demoAlarm} goAssistant={() => setPage("assistant")} />;
     if (page === "assistant") return <Assistant key={demoAlarm?.alarmId || "standard-assistant"} goGraph={() => setPage("graph")} demoAlarm={demoAlarm} />;
