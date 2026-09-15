@@ -8,3 +8,4 @@ data/source/
 __pycache__/
 *.pyc
 .gstack/
+.playwright-cli/
