@@ -1,0 +1,19 @@
+tunnel: 32690fcf-a371-4228-8046-7d68d9e536a0
+credentials-file: /root/.cloudflared/32690fcf-a371-4228-8046-7d68d9e536a0.json
+
+ingress:
+  - hostname: airport.ontobase.ai
+    service: http://127.0.0.1:8010
+    originRequest:
+      httpHostHeader: airport.ontobase.ai
+  - hostname: dae.ontobase.ai
+    path: ^/\.well-known/acme-challenge/.*
+    service: http://127.0.0.1:80
+    originRequest:
+      httpHostHeader: dae.ontobase.ai
+  - hostname: dae.ontobase.ai
+    service: https://127.0.0.1:443
+    originRequest:
+      httpHostHeader: dae.ontobase.ai
+      originServerName: dae.ontobase.ai
+  - service: http_status:404

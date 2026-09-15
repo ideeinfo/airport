@@ -1,0 +1,10 @@
+frontend/node_modules/
+frontend/dist/
+frontend/*.tsbuildinfo
+frontend/vite.config.js
+frontend/vite.config.d.ts
+backend/data/
+data/source/
+__pycache__/
+*.pyc
+.gstack/

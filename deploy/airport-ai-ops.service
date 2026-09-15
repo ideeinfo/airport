@@ -1,0 +1,19 @@
+[Unit]
+Description=Hohhot Airport AI Operations Demo
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=diwei
+Group=diwei
+WorkingDirectory=/home/diwei/airport-ai-ops/backend
+EnvironmentFile=-/etc/airport-ai-ops.env
+ExecStart=/home/diwei/dae/demo/backend/.venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 8010
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
