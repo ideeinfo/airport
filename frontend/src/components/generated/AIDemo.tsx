@@ -6,7 +6,7 @@ import { drawingDisciplineGlobalIds, filterCatalogByDiscipline, filterCatalogByS
 import { assetGlobalIds, groupAssets, layoutGraph, systemAssetGlobalIds } from "../../graphLayout";
 import { AirflowAlarmContext, airflowAlarm, airflowContextChips, airflowDeviationPercent, buildAirflowAssistantQuestion } from "../../demoFlow";
 import { extractSemanticObjects, isAssetSemanticObject } from "../../semanticObjects";
-const IFC_MODEL_URL = "/model/airport-mep-v2.glb";
+import { disposeModelResources, loadModelBuffer } from "../../modelResources";
 type Page = "login" | "home" | "drawings" | "graph" | "assistant";
 type IconName = "grid" | "drawing" | "graph" | "chat" | "search" | "bell" | "user" | "chevron" | "activity" | "bolt" | "alarm" | "work" | "building" | "filter" | "layers" | "expand" | "more" | "arrow" | "send" | "file" | "clock" | "check" | "warning" | "logout" | "spark" | "pin" | "link";
 const paths: Record<IconName, ReactNode> = {
@@ -321,14 +321,6 @@ function Home({ startAirflowDemo }: { startAirflowDemo: () => void }) {
   const [dashboard, setDashboard] = useState<DashboardData | null>(null);
   useEffect(() => {
     fetch("/api/dashboard").then(response => response.ok ? response.json() : Promise.reject()).then(setDashboard).catch(() => setDashboard(null));
-    if (!document.head.querySelector(`link[href="${IFC_MODEL_URL}"]`)) {
-      const preload = document.createElement("link");
-      preload.rel = "prefetch";
-      preload.as = "fetch";
-      preload.href = IFC_MODEL_URL;
-      preload.crossOrigin = "anonymous";
-      document.head.appendChild(preload);
-    }
   }, []);
   const equipment = dashboard?.equipment;
   const alarms = dashboard?.alarms;
@@ -722,6 +714,7 @@ function MiniModel({
   const wireframeRef = useRef(false);
   const [progress, setProgress] = useState(0);
   const [modelError, setModelError] = useState("");
+  const [loadAttempt, setLoadAttempt] = useState(0);
   const [wireframe, setWireframe] = useState(false);
   const [isolatedCount, setIsolatedCount] = useState(0);
   const [stats, setStats] = useState({ renderedElements: 0, triangles: 0, ifcProducts: 0 });
@@ -729,16 +722,17 @@ function MiniModel({
   useEffect(() => {
     const mount = mountRef.current;
     if (!mount) return;
+    let disposed = false;
+    let contextLost = false;
+    let frame = 0;
+    setProgress(0);
+    setModelError("");
+    setIsolatedCount(0);
+    setStats({ renderedElements: 0, triangles: 0, ifcProducts: 0 });
     const scene = new THREE.Scene();
     scene.background = new THREE.Color(0xf0f4f5);
     const camera = new THREE.PerspectiveCamera(38, 1, 0.01, 10000);
     let renderer: THREE.WebGLRenderer;
-    const probe = document.createElement("canvas");
-    if (!probe.getContext("webgl2") && !probe.getContext("webgl")) {
-      setProgress(100);
-      setModelError("当前浏览器未启用 WebGL；知识图谱仍可使用，请启用硬件加速查看 IFC 三维模型");
-      return;
-    }
     try {
       renderer = new THREE.WebGLRenderer({ antialias: true });
     } catch {
@@ -750,6 +744,14 @@ function MiniModel({
     renderer.outputColorSpace = THREE.SRGBColorSpace;
     renderer.shadowMap.enabled = true;
     mount.appendChild(renderer.domElement);
+    const onContextLost = (event: Event) => {
+      event.preventDefault();
+      if (disposed) return;
+      contextLost = true;
+      cancelAnimationFrame(frame);
+      setModelError("三维显示已中断，请重新加载模型");
+    };
+    renderer.domElement.addEventListener("webglcontextlost", onContextLost);
     const controls = new OrbitControls(camera, renderer.domElement);
     controls.enableDamping = true;
     controls.dampingFactor = 0.08;
@@ -804,7 +806,7 @@ function MiniModel({
       materialsRef.current = originalMaterials;
     };
     const applySelection = (globalIds: string[]) => {
-      if (!model) return;
+      if (disposed || contextLost || !model) return;
       clearHighlight();
       const wanted = new Set(globalIds.filter(Boolean));
       const targets = modelMeshes.filter(record => wanted.has(record.globalId));
@@ -860,7 +862,16 @@ function MiniModel({
     };
     applySelectionRef.current = applySelection;
     resetRef.current = () => applySelection(selectedGuidsRef.current);
-    new GLTFLoader().load(IFC_MODEL_URL, gltf => {
+    const subscription = loadModelBuffer(value => {
+      if (!disposed && !contextLost) setProgress(value);
+    });
+    void subscription.promise.then(async buffer => {
+      if (disposed || contextLost) return;
+      const gltf = await new GLTFLoader().parseAsync(buffer, "/model/");
+      if (disposed || contextLost) {
+        disposeModelResources(gltf.scene);
+        return;
+      }
       model = gltf.scene;
       model.rotation.x = -Math.PI / 2;
       model.traverse(object => {
@@ -884,9 +895,10 @@ function MiniModel({
       materialsRef.current = originalMaterials;
       setProgress(100);
       applySelection(selectedGuidsRef.current);
-    }, event => {
-      if (event.total) setProgress(Math.round(event.loaded / event.total * 100));
-    }, () => setModelError("IFC 模型加载失败，请检查 GLB 构建产物"));
+    }).catch(reason => {
+      if (disposed || contextLost) return;
+      setModelError(reason instanceof Error ? reason.message : "模型加载失败，请重试");
+    });
     const resize = () => {
       const width = mount.clientWidth;
       const height = mount.clientHeight;
@@ -898,30 +910,40 @@ function MiniModel({
     const observer = new ResizeObserver(resize);
     observer.observe(mount);
     resize();
-    let frame = 0;
     const animate = () => {
+      if (disposed || contextLost) return;
       frame = requestAnimationFrame(animate);
       controls.update();
       renderer.render(scene, camera);
     };
     animate();
     return () => {
+      disposed = true;
+      subscription.unsubscribe();
+      applySelectionRef.current = () => undefined;
+      resetRef.current = () => undefined;
       cancelAnimationFrame(frame);
       observer.disconnect();
       clearHighlight();
       controls.dispose();
+      renderer.domElement.removeEventListener("webglcontextlost", onContextLost);
+      disposeModelResources(scene);
+      renderer.forceContextLoss();
       renderer.dispose();
+      scene.clear();
+      model = null;
+      modelMeshes = [];
       materialsRef.current = [];
       mount.replaceChildren();
     };
-  }, []);
+  }, [loadAttempt]);
   const selectionKey = selectedGlobalIds.join("|");
   useEffect(() => applySelectionRef.current(selectedGuidsRef.current), [selectionKey]);
   return <div className={`model-view ${className}`}>
     <div className="model-title"><span><i className="live-dot" />{title}</span><div>{selectedGlobalIds.length > 0 && <Badge tone={isolatedCount ? "amber" : "gray"}>{isolatedCount ? `已隔离 ${selectedLabel} · ${isolatedCount}个构件` : "正在定位几何"}</Badge>}<Badge tone="green">IFC2X3 · GLB</Badge></div></div>
     <div ref={mountRef} className="model-webgl" aria-label="IFC 三维模型查看器" />
     {progress < 100 && !modelError && <div className="model-loading"><span className="spinner" />正在加载 IFC 几何 {progress}%</div>}
-    {modelError && <div className="model-loading model-error"><Icon name="warning" />{modelError}</div>}
+    {modelError && <div className="model-loading model-error" role="alert"><Icon name="warning" />{modelError}<button className="outline" onClick={() => setLoadAttempt(attempt => attempt + 1)}>重新加载模型</button></div>}
     <div className="model-controls"><button onClick={() => resetRef.current()} aria-label="重置视角">◎</button><button className={wireframe ? "mini-active" : ""} onClick={() => setWireframe(current => {
       const next = !current;
       wireframeRef.current = next;
